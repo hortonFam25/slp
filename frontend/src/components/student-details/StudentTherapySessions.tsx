@@ -26,6 +26,11 @@ import {
   Collapse,
   TablePagination,
   TableFooter,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
+  TextField,
   useMediaQuery,
   useTheme,
 } from '@mui/material';
@@ -44,8 +49,10 @@ import {
   Assessment,
   ExpandMore,
   ExpandLess,
+  Timer,
 } from '@mui/icons-material';
 import { TherapySessionSummary } from '../../lib/api/therapySessions';
+import { useDeleteTherapySession, useUpdateTherapySession } from '../../lib/hooks/useTherapySessions';
 
 interface StudentTherapySessionsProps {
   studentId: number;
@@ -66,6 +73,11 @@ export function StudentTherapySessions({ studentId, therapySessions, loading, on
   const [expandedSessions, setExpandedSessions] = useState<ExpandedSessions>({});
   const [page, setPage] = useState(0);
   const [rowsPerPage, setRowsPerPage] = useState(10);
+  const deleteSessionMutation = useDeleteTherapySession();
+  const updateSessionMutation = useUpdateTherapySession();
+  const [durationDialogOpen, setDurationDialogOpen] = useState(false);
+  const [durationSession, setDurationSession] = useState<TherapySessionSummary | null>(null);
+  const [durationMinutes, setDurationMinutes] = useState<number>(0);
 
   const handleActionMenuOpen = (event: React.MouseEvent<HTMLElement>, session: TherapySessionSummary) => {
     setActionMenuAnchor(event.currentTarget);
@@ -75,6 +87,52 @@ export function StudentTherapySessions({ studentId, therapySessions, loading, on
   const handleActionMenuClose = () => {
     setActionMenuAnchor(null);
     setSelectedSession(null);
+  };
+
+  const handleOpenAdjustDuration = (session: TherapySessionSummary) => {
+    setDurationSession(session);
+    setDurationMinutes(Math.max(0, session.duration_minutes || 0));
+    setDurationDialogOpen(true);
+  };
+
+  const handleCloseAdjustDuration = () => {
+    if (updateSessionMutation.isPending) return;
+    setDurationDialogOpen(false);
+    setDurationSession(null);
+  };
+
+  const handleSaveAdjustedDuration = async () => {
+    if (!durationSession) return;
+    const minutes = Number(durationMinutes);
+    if (!Number.isFinite(minutes) || minutes <= 0) {
+      alert('Please enter a duration greater than 0 minutes.');
+      return;
+    }
+
+    try {
+      const sessionData: any = {
+        actual_duration_minutes: minutes,
+      };
+
+      // If we have an actual start time, also adjust actual_end_time so duration updates consistently.
+      if (durationSession.actual_start_time) {
+        const start = new Date(durationSession.actual_start_time);
+        if (!Number.isNaN(start.getTime())) {
+          const end = new Date(start.getTime() + minutes * 60 * 1000);
+          sessionData.actual_end_time = end.toISOString();
+        }
+      }
+
+      await updateSessionMutation.mutateAsync({
+        sessionId: durationSession.id,
+        sessionData,
+      });
+      onRefresh();
+      handleCloseAdjustDuration();
+    } catch (err) {
+      console.error('Failed to update session duration:', err);
+      alert('Failed to update session duration. Please try again.');
+    }
   };
 
   const toggleSessionExpansion = (sessionId: number) => {
@@ -90,6 +148,14 @@ export function StudentTherapySessions({ studentId, therapySessions, loading, on
       date: date.toLocaleDateString(),
       time: date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
     };
+  };
+
+  const getDisplayTimeRange = (session: TherapySessionSummary) => {
+    const useActual = (session.status === 'in-progress' || session.status === 'completed') &&
+      !!session.actual_start_time;
+    const start = useActual ? session.actual_start_time : session.start_time;
+    const end = useActual ? session.actual_end_time : session.end_time;
+    return { start, end };
   };
 
   const formatDuration = (minutes: number) => {
@@ -215,10 +281,15 @@ export function StudentTherapySessions({ studentId, therapySessions, loading, on
     console.log('Editing session:', session.id);
   };
 
-  const handleDeleteSession = (session: TherapySessionSummary) => {
+  const handleDeleteSession = async (session: TherapySessionSummary) => {
     if (window.confirm('Are you sure you want to delete this therapy session?')) {
-      // TODO: Implement delete session
-      console.log('Deleting session:', session.id);
+      try {
+        await deleteSessionMutation.mutateAsync(session.id);
+        onRefresh();
+      } catch (err) {
+        console.error('Failed to delete therapy session:', err);
+        alert('Failed to delete therapy session. Please try again.');
+      }
     }
   };
 
@@ -422,6 +493,7 @@ export function StudentTherapySessions({ studentId, therapySessions, loading, on
                   const canStart = session.status === 'planned';
                   const canComplete = session.status === 'in-progress';
                   const isExpanded = expandedSessions[session.id];
+                  const { start, end } = getDisplayTimeRange(session);
                   
                   return (
                     <React.Fragment key={session.id}>
@@ -441,11 +513,11 @@ export function StudentTherapySessions({ studentId, therapySessions, loading, on
                               <CalendarToday fontSize="small" color="action" />
                               {date}
                             </Typography>
-                            {session.start_time && (
+                            {start && (
                               <Typography variant="body2" color="text.secondary" sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
                                 <Schedule fontSize="small" color="action" />
-                                {formatDateTime(session.start_time).time}
-                                {session.end_time && ` - ${formatDateTime(session.end_time).time}`}
+                                {formatDateTime(start).time}
+                                {end && ` - ${formatDateTime(end).time}`}
                               </Typography>
                             )}
                           </Box>
@@ -619,6 +691,16 @@ export function StudentTherapySessions({ studentId, therapySessions, loading, on
           </ListItemIcon>
           <ListItemText>Edit Session</ListItemText>
         </MenuItem>
+
+        <MenuItem onClick={() => {
+          if (selectedSession) handleOpenAdjustDuration(selectedSession);
+          handleActionMenuClose();
+        }}>
+          <ListItemIcon>
+            <Timer fontSize="small" />
+          </ListItemIcon>
+          <ListItemText>Adjust Actual Duration</ListItemText>
+        </MenuItem>
         
         {selectedSession?.status === 'planned' && (
           <MenuItem onClick={() => {
@@ -657,6 +739,35 @@ export function StudentTherapySessions({ studentId, therapySessions, loading, on
           <ListItemText>Delete Session</ListItemText>
         </MenuItem>
       </Menu>
+
+      {/* Adjust Duration Dialog */}
+      <Dialog open={durationDialogOpen} onClose={handleCloseAdjustDuration} maxWidth="xs" fullWidth>
+        <DialogTitle>Adjust Actual Duration</DialogTitle>
+        <DialogContent>
+          <TextField
+            fullWidth
+            type="number"
+            label="Minutes"
+            value={durationMinutes}
+            onChange={(e) => setDurationMinutes(Number(e.target.value))}
+            inputProps={{ min: 1, step: 1 }}
+            sx={{ mt: 1 }}
+            helperText="Sets actual therapy minutes. If actual start time exists, actual end time will be recalculated."
+          />
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={handleCloseAdjustDuration} disabled={updateSessionMutation.isPending}>
+            Cancel
+          </Button>
+          <Button
+            variant="contained"
+            onClick={handleSaveAdjustedDuration}
+            disabled={updateSessionMutation.isPending}
+          >
+            {updateSessionMutation.isPending ? 'Saving...' : 'Save'}
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   );
 }

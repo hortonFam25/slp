@@ -16,12 +16,16 @@ import {
   Tab,
   Paper,
   useMediaQuery,
-  useTheme
+  useTheme,
+  Stack,
+  IconButton
 } from '@mui/material';
-import { Search, TrackChanges, Category, Person } from '@mui/icons-material';
+import { Search, TrackChanges, Category, Person, FileUpload, Refresh } from '@mui/icons-material';
+import { Target } from 'lucide-react';
 import { GoalManagement } from '../../components/GoalManagement';
 import { useStudents } from '../../lib/hooks/useStudents';
 import { GoalCategoriesManagement } from './components/GoalCategoriesManagement';
+import { UniversalCSVImport } from '../../components/UniversalCSVImport';
 
 interface TabPanelProps {
   children?: React.ReactNode;
@@ -52,9 +56,10 @@ export default function Goals() {
   const theme = useTheme();
   const isMobile = useMediaQuery(theme.breakpoints.down('sm'));
   const [tabValue, setTabValue] = useState(0);
-  const { students, loading, error } = useStudents();
+  const { students, loading, error, refetch } = useStudents();
   const [selectedStudentId, setSelectedStudentId] = useState<number | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
+  const [isCSVImportOpen, setIsCSVImportOpen] = useState(false);
 
   // Filter students based on search term
   const filteredStudents = students.filter(student =>
@@ -68,6 +73,11 @@ export default function Goals() {
     setTabValue(newValue);
   };
 
+  const handleCSVImportComplete = (result: any) => {
+    setIsCSVImportOpen(false);
+    refetch(); // Refresh the students list to pick up any new data
+  };
+
   return (
     <Box sx={{ 
       p: isMobile ? 2 : 3,
@@ -78,19 +88,44 @@ export default function Goals() {
     }}>
       {/* Header */}
       <Box sx={{ flexShrink: 0, mb: 2 }}>
-        <Typography 
-          variant={isMobile ? "h5" : "h4"} 
-          component="h1" 
-          sx={{ 
-            mb: 2, 
-            display: 'flex', 
-            alignItems: 'center',
-            fontSize: isMobile ? '1.5rem' : undefined
-          }}
-        >
-          <TrackChanges sx={{ mr: isMobile ? 1 : 2, fontSize: isMobile ? 24 : 32 }} />
-          {isMobile ? "Goal Management" : "IEP Goals Management"}
-        </Typography>
+        <Box sx={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: isMobile ? 'flex-start' : 'center',
+          flexDirection: isMobile ? 'column' : 'row',
+          gap: isMobile ? 2 : 0,
+          mb: 2
+        }}>
+          <Typography 
+            variant={isMobile ? "h5" : "h4"} 
+            component="h1" 
+            sx={{ 
+              display: 'flex', 
+              alignItems: 'center',
+              fontSize: isMobile ? '1.5rem' : undefined,
+              color: '#41AAB7',
+              fontWeight: 700,
+              gap: 2
+            }}
+          >
+            <Target size={isMobile ? 24 : 32} />
+            Goals
+          </Typography>
+          
+          <Stack direction="row" spacing={1}>
+            <IconButton onClick={refetch} disabled={loading}>
+              <Refresh />
+            </IconButton>
+            <Button 
+              variant="outlined" 
+              startIcon={<FileUpload />}
+              onClick={() => setIsCSVImportOpen(true)}
+              size={isMobile ? "small" : "medium"}
+            >
+              Import Goals
+            </Button>
+          </Stack>
+        </Box>
 
         {/* Navigation Tabs */}
         <Paper elevation={1} sx={{ flexShrink: 0 }}>
@@ -265,6 +300,14 @@ export default function Goals() {
           </Box>
         </TabPanel>
       </Box>
+
+      {/* CSV Import Dialog */}
+      <UniversalCSVImport
+        open={isCSVImportOpen}
+        onClose={() => setIsCSVImportOpen(false)}
+        onImportComplete={handleCSVImportComplete}
+        defaultImportType="goals"
+      />
     </Box>
   );
 }

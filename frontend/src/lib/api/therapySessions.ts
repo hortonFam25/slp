@@ -70,6 +70,8 @@ export interface TherapySession {
   session_date: string;
   start_time?: string;
   end_time?: string;
+  actual_start_time?: string;
+  actual_end_time?: string;
   planned_duration_minutes?: number;
   actual_duration_minutes?: number;
   session_type: string;
@@ -115,6 +117,8 @@ export interface TherapySessionSummary {
   session_date: string;
   start_time?: string;
   end_time?: string;
+  actual_start_time?: string;
+  actual_end_time?: string;
   duration_minutes: number;
   session_type: string;
   status: string;
@@ -131,6 +135,8 @@ export interface CreateTherapySessionRequest {
   session_date: string;
   start_time?: string;
   end_time?: string;
+  actual_start_time?: string;
+  actual_end_time?: string;
   planned_duration_minutes?: number;
   actual_duration_minutes?: number;
   session_type?: string;
@@ -152,6 +158,8 @@ export interface CreateTherapySessionRequest {
 export interface UpdateTherapySessionRequest {
   start_time?: string;
   end_time?: string;
+  actual_start_time?: string;
+  actual_end_time?: string;
   actual_duration_minutes?: number;
   status?: string;
   prep_notes?: string;

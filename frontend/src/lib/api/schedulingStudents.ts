@@ -31,7 +31,7 @@ export interface StudentScheduleView {
   last: string;
   uic?: string;
   grade_level?: string;
-  case_manager?: string;
+  case_manager_name?: string;  // Updated to match backend
   enrollment_status: string;
   
   // School relationship

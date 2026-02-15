@@ -27,6 +27,17 @@ export interface StudentEligibility {
   is_active: boolean;
 }
 
+// Teacher summary interface for student relationships
+export interface TeacherSummary {
+  id: number;
+  first_name: string;
+  last_name: string;
+  title?: string;
+  email?: string;
+  display_name: string;
+  full_name: string;
+}
+
 // Student data interfaces
 export interface Student {
   id: number;
@@ -34,8 +45,6 @@ export interface Student {
   last: string;
   uic?: string;
   grade_level?: string;
-  teacher_name?: string;
-  case_manager?: string;
   enrollment_status: string;
   is_archived: boolean;
   date_of_birth?: string;
@@ -48,7 +57,13 @@ export interface Student {
   iep_meeting_date?: string;
   initial_evaluation_date?: string;
   eligibility_determination_date?: string;
+  // School and teacher assignments
   school_id?: number;
+  teacher_id?: number;
+  case_manager_id?: number;
+  teacher?: TeacherSummary;
+  case_manager?: TeacherSummary;
+  school?: { id: number; name: string; district?: string };
   // Eligibility information
   eligibilities: StudentEligibility[];
 }
@@ -58,11 +73,14 @@ export interface StudentSummary {
   first: string;
   last: string;
   grade_level?: string;
-  case_manager?: string;
+  case_manager?: string | TeacherSummary;  // Can be legacy string or new object
   enrollment_status: string;
   is_archived: boolean;
   school_id?: number;  // Added for scheduling functionality
   uic?: string;  // Added for student identification
+  teacher_id?: number;
+  case_manager_id?: number;
+  teacher?: TeacherSummary;
 }
 
 export interface CreateStudentRequest {
@@ -70,8 +88,8 @@ export interface CreateStudentRequest {
   last: string;
   uic?: string;
   grade_level?: string;
-  teacher_name?: string;
-  case_manager?: string;
+  teacher_id?: number;
+  case_manager_id?: number;
   enrollment_status?: string;
   is_archived?: boolean;
   date_of_birth?: string;
@@ -90,8 +108,6 @@ export interface UpdateStudentRequest {
   last?: string;
   uic?: string;
   grade_level?: string;
-  teacher_name?: string;
-  case_manager?: string;
   enrollment_status?: string;
   is_archived?: boolean;
   date_of_birth?: string;
@@ -102,7 +118,10 @@ export interface UpdateStudentRequest {
   iep_meeting_date?: string;
   initial_evaluation_date?: string;
   eligibility_determination_date?: string;
+  // School and teacher assignments
   school_id?: number;
+  teacher_id?: number;
+  case_manager_id?: number;
 }
 
 export interface StudentsFilters {

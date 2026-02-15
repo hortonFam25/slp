@@ -1,4 +1,4 @@
-import { Box, List, ListItem, ListItemButton, ListItemIcon, ListItemText, Typography } from '@mui/material';
+import { Box, List, ListItem, ListItemButton, ListItemIcon, ListItemText, Typography, Tooltip } from '@mui/material';
 import { Link, useLocation } from 'react-router-dom';
 import { 
   LayoutDashboard, 
@@ -35,7 +35,7 @@ export function Sidebar({ open = true, onNavigate }: SidebarProps) {
   return (
     <Box
       sx={{
-        width: open ? 240 : 0,
+        width: open ? 240 : 64,
         flexShrink: 0,
         transition: 'width 0.3s ease',
         overflow: 'hidden',
@@ -50,7 +50,7 @@ export function Sidebar({ open = true, onNavigate }: SidebarProps) {
       {/* Sticky Logo Section */}
       <Box
         sx={{
-          p: 2,
+          p: open ? 2 : 1,
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
@@ -58,17 +58,37 @@ export function Sidebar({ open = true, onNavigate }: SidebarProps) {
           borderColor: 'divider',
           flexShrink: 0, // Prevent shrinking
           bgcolor: 'background.paper', // Ensure background
+          minHeight: 84, // Consistent height regardless of state
         }}
       >
-        <img
-          src="/images/SLPro.png"
-          alt="SLP Pro"
-          style={{
-            height: '60px',
-            width: 'auto',
-            maxWidth: '100%',
-          }}
-        />
+        {open ? (
+          <img
+            src="/images/SLPro.png"
+            alt="SLP Pro"
+            style={{
+              height: '60px',
+              width: 'auto',
+              maxWidth: '100%',
+            }}
+          />
+        ) : (
+          <Box
+            sx={{
+              width: 32,
+              height: 32,
+              borderRadius: '6px',
+              bgcolor: 'primary.main',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              color: 'white',
+              fontWeight: 'bold',
+              fontSize: '1.2rem',
+            }}
+          >
+            S
+          </Box>
+        )}
       </Box>
       
       {/* Scrollable Navigation */}
@@ -82,42 +102,55 @@ export function Sidebar({ open = true, onNavigate }: SidebarProps) {
             const Icon = item.icon;
             const isActive = location.pathname === item.path;
             
-            return (
-              <ListItem key={item.path} disablePadding>
-                <ListItemButton
-                  component={Link}
-                  to={item.path}
-                  selected={isActive}
-                  onClick={() => onNavigate?.()}
-                  sx={{
-                    minHeight: 48,
-                    px: 2.5,
-                    '&.Mui-selected': {
-                      bgcolor: '#40A8B6',
-                      color: 'white',
-                      '&:hover': {
-                        bgcolor: '#369aa6',
-                      },
+            const buttonContent = (
+              <ListItemButton
+                component={Link}
+                to={item.path}
+                selected={isActive}
+                onClick={() => onNavigate?.()}
+                sx={{
+                  minHeight: 48,
+                  px: open ? 2.5 : 1.5,
+                  justifyContent: open ? 'flex-start' : 'center',
+                  '&.Mui-selected': {
+                    bgcolor: '#40A8B6',
+                    color: 'white',
+                    '&:hover': {
+                      bgcolor: '#369aa6',
                     },
+                  },
+                }}
+              >
+                <ListItemIcon
+                  sx={{
+                    minWidth: 0,
+                    mr: open ? 3 : 0,
+                    color: isActive ? 'inherit' : 'text.secondary',
+                    justifyContent: 'center',
                   }}
                 >
-                  <ListItemIcon
-                    sx={{
-                      minWidth: 0,
-                      mr: 3,
-                      color: isActive ? 'inherit' : 'text.secondary',
-                    }}
-                  >
-                    <Icon size={20} />
-                  </ListItemIcon>
+                  <Icon size={20} />
+                </ListItemIcon>
+                {open && (
                   <ListItemText 
                     primary={item.label}
                     sx={{
-                      opacity: open ? 1 : 0,
-                      transition: 'opacity 0.3s ease',
+                      opacity: 1,
                     }}
                   />
-                </ListItemButton>
+                )}
+              </ListItemButton>
+            );
+
+            return (
+              <ListItem key={item.path} disablePadding>
+                {open ? (
+                  buttonContent
+                ) : (
+                  <Tooltip title={item.label} placement="right" arrow>
+                    {buttonContent}
+                  </Tooltip>
+                )}
               </ListItem>
             );
           })}

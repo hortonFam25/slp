@@ -18,7 +18,9 @@ export function StudentGoals({ studentId, studentName }: StudentGoalsProps) {
   return (
     <Box sx={{ 
       height: '100%',
-      overflow: 'hidden'
+      display: 'flex',
+      flexDirection: 'column',
+      minHeight: 0
     }}>
       <GoalManagement 
         studentId={studentId} 

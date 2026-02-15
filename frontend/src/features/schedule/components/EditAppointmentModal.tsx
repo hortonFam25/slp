@@ -24,14 +24,68 @@ import {
 } from '@mui/material';
 import { TimePicker } from '@mui/x-date-pickers/TimePicker';
 import { DateTimePicker } from '@mui/x-date-pickers/DateTimePicker';
+import { DatePicker } from '@mui/x-date-pickers/DatePicker';
 import { LocalizationProvider } from '@mui/x-date-pickers/LocalizationProvider';
 import { AdapterDateFns } from '@mui/x-date-pickers/AdapterDateFns';
-import { format, setHours, setMinutes, addMinutes, isSameDay, parseISO } from 'date-fns';
-import { Person, Schedule, AccessTime, School, Assignment, ExpandMore, ExpandLess, Close } from '@mui/icons-material';
-import { AppointmentSummary } from '../../../lib/api/scheduling';
+import { format, setHours, setMinutes, addMinutes, isSameDay, parseISO, differenceInDays } from 'date-fns';
+import { Person, Schedule, AccessTime, School, Assignment, ExpandMore, ExpandLess, Close, Repeat } from '@mui/icons-material';
+import { AppointmentSummary, schedulingApi, SeriesPatternUpdate } from '../../../lib/api/scheduling';
 import { StudentScheduleView } from '../../../lib/api/schedulingStudents';
 import { RecurringSchedule, RecurringConfig } from './RecurringSchedule';
+import { SeriesActionDialog } from './SeriesActionDialog';
+import { SeriesPatternDialog } from './SeriesPatternDialog';
 import { useStudentActiveGoals } from '../../../lib/hooks/useStudentGoals';
+
+// Helper function to check if appointment can be modified
+const canModifyAppointment = (appointment: AppointmentSummary): { canModify: boolean; reason?: string } => {
+  // Primary check: therapy session status
+  if (appointment.therapy_session_status) {
+    if (appointment.therapy_session_status === 'completed') {
+      return { canModify: false, reason: "This therapy session has been completed" };
+    }
+    if (appointment.therapy_session_status === 'in_progress') {
+      return { canModify: false, reason: "This therapy session is currently in progress" };
+    }
+  }
+  
+  // Secondary check: appointment timing
+  const now = new Date();
+  const appointmentStart = new Date(appointment.start_datetime);
+  
+  if (appointmentStart < now && !appointment.therapy_session_status) {
+    return { canModify: false, reason: "This appointment has already started" };
+  }
+  
+  return { canModify: true };
+};
+
+// Helper function to analyze series update requirements
+const analyzeSeriesUpdate = (originalAppointment: AppointmentSummary, newDate: Date) => {
+  const originalDate = new Date(originalAppointment.start_datetime);
+  const originalDateOnly = new Date(originalDate.getFullYear(), originalDate.getMonth(), originalDate.getDate());
+  const newDateOnly = new Date(newDate.getFullYear(), newDate.getMonth(), newDate.getDate());
+  
+  // Check if date changed
+  const dateChanged = !isSameDay(originalDateOnly, newDateOnly);
+  
+  if (!dateChanged) {
+    return { type: 'time_only' as const };
+  }
+  
+  // Calculate offset in days
+  const offsetDays = differenceInDays(newDateOnly, originalDateOnly);
+  const originalDayOfWeek = originalDate.getDay();
+  const newDayOfWeek = newDate.getDay();
+  const dayOfWeekChanged = originalDayOfWeek !== newDayOfWeek;
+  
+  return {
+    type: 'date_changed' as const,
+    offsetDays,
+    originalDayOfWeek,
+    newDayOfWeek,
+    dayOfWeekChanged
+  };
+};
 
 // Helper function to parse selected goals and objectives (reused from StudentSchedulingModal)
 const parseSelectedGoalsAndObjectives = (selectedIds: number[], studentGoals: any[]) => {
@@ -118,6 +172,7 @@ interface EditAppointmentModalProps {
       priority: number;
     }>;
   }) => void;
+  onSeriesUpdate?: () => Promise<void>; // New callback for series updates that only refreshes data
   onLoadTherapySession?: (appointmentId: number) => Promise<{
     goals: Array<{ goal_id: number; goal_text: string; planned: boolean; worked_on: boolean }>;
     objectives: Array<{ objective_id: number; goal_id: number; objective_text: string; planned: boolean; worked_on: boolean }>;
@@ -131,10 +186,12 @@ export function EditAppointmentModal({
   students,
   existingAppointments,
   onUpdateAppointment,
+  onSeriesUpdate,
   onLoadTherapySession
 }: EditAppointmentModalProps) {
   // Initialize state with appointment data - using same structure as create modal
   const [selectedStudent, setSelectedStudent] = useState<StudentScheduleView | null>(null);
+  const [selectedDate, setSelectedDate] = useState<Date>(new Date());
   const [startTime, setStartTime] = useState('');
   const [endTime, setEndTime] = useState('');
   const [sessionNotes, setSessionNotes] = useState('');
@@ -155,6 +212,14 @@ export function EditAppointmentModal({
   const [error, setError] = useState<string | null>(null);
   const [loadingTherapySession, setLoadingTherapySession] = useState(false);
   const [therapySessionError, setTherapySessionError] = useState<string | null>(null);
+  const [seriesActionDialogOpen, setSeriesActionDialogOpen] = useState(false);
+  const [pendingAction, setPendingAction] = useState<'edit' | null>(null);
+  const [seriesPatternDialogOpen, setSeriesPatternDialogOpen] = useState(false);
+  const [patternAnalysis, setPatternAnalysis] = useState<any>(null);
+
+  // Check if appointment can be modified
+  const modificationCheck = canModifyAppointment(appointment);
+  const canModify = modificationCheck.canModify;
 
   // Find the student for this appointment and load therapy session data
   useEffect(() => {
@@ -165,9 +230,10 @@ export function EditAppointmentModal({
         setSelectedStudent(student);
       }
       
-      // Set time values from datetime - convert to HH:MM format like create modal
+      // Set date and time values from datetime
       if (appointment.start_datetime) {
         const startDate = new Date(appointment.start_datetime);
+        setSelectedDate(startDate); // Set the date from appointment
         const startTimeStr = `${startDate.getHours().toString().padStart(2, '0')}:${startDate.getMinutes().toString().padStart(2, '0')}`;
         setStartTime(startTimeStr);
       }
@@ -233,8 +299,8 @@ export function EditAppointmentModal({
 
   // Form validation
   const canSubmit = useMemo(() => {
-    return selectedStudent && startTime && endTime;
-  }, [selectedStudent, startTime, endTime]);
+    return selectedStudent && selectedDate && startTime && endTime;
+  }, [selectedStudent, selectedDate, startTime, endTime]);
 
   // Check for conflicts (simplified for now)
   const hasConflicts = useMemo(() => {
@@ -244,6 +310,31 @@ export function EditAppointmentModal({
 
 
   const handleSubmit = async () => {
+    if (!canSubmit || !selectedStudent) return;
+
+    // Check if this appointment is part of a series
+    if (appointment.series_id) {
+      // Analyze the type of change being made
+      const analysis = analyzeSeriesUpdate(appointment, selectedDate);
+      
+      if (analysis.type === 'date_changed') {
+        // Date changed - show pattern dialog for more options
+        setPatternAnalysis(analysis);
+        setSeriesPatternDialogOpen(true);
+        return;
+      } else {
+        // Time only change - show simple series dialog
+        setPendingAction('edit');
+        setSeriesActionDialogOpen(true);
+        return;
+      }
+    }
+
+    // Proceed with single appointment edit
+    await performSingleEdit();
+  };
+
+  const performSingleEdit = async () => {
     if (!canSubmit || !selectedStudent) return;
 
     setLoading(true);
@@ -263,7 +354,6 @@ export function EditAppointmentModal({
       }
 
       // Create start and end datetime from selected date and times
-      const selectedDate = appointment.start_datetime ? new Date(appointment.start_datetime) : new Date();
       const [startHour, startMinute] = startTime.split(':').map(Number);
       const [endHour, endMinute] = endTime.split(':').map(Number);
       
@@ -273,6 +363,127 @@ export function EditAppointmentModal({
       const endDateTime = new Date(selectedDate);
       endDateTime.setHours(endHour, endMinute, 0, 0);
 
+      // Check if user wants to make this a recurring appointment
+      if (recurringConfig.isRecurring) {
+        console.log('🔄 Converting to recurring appointment');
+        
+        // Delete the existing single appointment first
+        await schedulingApi.deleteAppointment(appointment.id);
+        
+        // Create recurring appointments using the same logic as StudentSchedulingModal
+        const recurringData = {
+          student_id: selectedStudent.id,
+          start_datetime: formatLocalDateTime(startDateTime),
+          end_datetime: formatLocalDateTime(endDateTime),
+          notes: sessionNotes.trim() || undefined,
+          appointment_type: 'individual',
+          status: 'scheduled',
+          // Add goal/objective planning if provided
+          planned_goals: goalIds?.length ? goalIds.map(goalId => ({
+            goal_id: goalId,
+            planned: true,
+            worked_on: false,
+            priority: 1
+          })) : undefined,
+          planned_objectives: objectiveIds?.length ? objectiveIds.map(objectiveId => ({
+            objective_id: objectiveId,
+            goal_id: objectiveToGoalMap[objectiveId] || 0,
+            planned: true,
+            worked_on: false,
+            priority: 1,
+            pre_session_notes: objectivePreSessionNotes[objectiveId] || undefined
+          })) : undefined,
+          // Convert frontend recurring config to backend format
+          recurring_config: {
+            frequency: recurringConfig.frequency,
+            interval: recurringConfig.interval,
+            days_of_week: recurringConfig.daysOfWeek,
+            end_type: recurringConfig.endType,
+            end_date: recurringConfig.endDate?.toISOString(),
+            max_occurrences: recurringConfig.maxOccurrences
+          }
+        };
+        
+        console.log('🔄 Creating recurring series:', recurringData);
+        await schedulingApi.createRecurringAppointments(recurringData);
+        
+        // Trigger data refresh
+        if (onSeriesUpdate) {
+          await onSeriesUpdate();
+        }
+      } else {
+        // Transform goal and objective IDs to PlannedGoal and PlannedObjective objects
+        const plannedGoals = goalIds.map(goalId => ({
+          goal_id: goalId,
+          planned: true,
+          worked_on: false,
+          priority: 1
+        }));
+
+        const plannedObjectives = objectiveIds.map(objectiveId => ({
+          objective_id: objectiveId,
+          goal_id: objectiveToGoalMap[objectiveId],
+          planned: true,
+          worked_on: false,
+          priority: 1,
+          pre_session_notes: objectivePreSessionNotes[objectiveId] || undefined
+        }));
+
+        const appointmentData = {
+          id: appointment.id,
+          student_id: selectedStudent.id,
+          start_datetime: formatLocalDateTime(startDateTime),
+          end_datetime: formatLocalDateTime(endDateTime),
+          notes: sessionNotes.trim() || undefined,
+          planned_goals: plannedGoals.length > 0 ? plannedGoals : undefined,
+          planned_objectives: plannedObjectives.length > 0 ? plannedObjectives : undefined
+        };
+
+        console.log('🔄 Edit Appointment - Submitting:', appointmentData);
+        await onUpdateAppointment(appointmentData);
+      }
+      
+      onClose();
+    } catch (err) {
+      console.error('❌ Edit Appointment Error:', err);
+      setError(err instanceof Error ? err.message : 'Failed to update appointment');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const performSeriesEdit = async (updateType?: 'offset_only' | 'day_alignment') => {
+    if (!canSubmit || !selectedStudent || !appointment.series_id) return;
+
+    setLoading(true);
+    setError(null);
+
+    try {
+      // Parse selected goals and objectives - same as single edit
+      let goalIds: number[] = [];
+      let objectiveIds: number[] = [];
+      let objectiveToGoalMap: { [key: number]: number } = {};
+
+      if (selectedGoalIds.length > 0 && goals.length > 0) {
+        const parsed = parseSelectedGoalsAndObjectives(selectedGoalIds, goals);
+        goalIds = parsed.goalIds;
+        objectiveIds = parsed.objectiveIds;
+        objectiveToGoalMap = parsed.objectiveToGoalMap;
+      }
+
+      // Create start and end datetime from selected date and times
+      const [startHour, startMinute] = startTime.split(':').map(Number);
+      const [endHour, endMinute] = endTime.split(':').map(Number);
+      
+      const startDateTime = new Date(selectedDate);
+      startDateTime.setHours(startHour, startMinute, 0, 0);
+      
+      const endDateTime = new Date(selectedDate);
+      endDateTime.setHours(endHour, endMinute, 0, 0);
+
+      // Analyze what type of update this is
+      const analysis = analyzeSeriesUpdate(appointment, selectedDate);
+      
       // Transform goal and objective IDs to PlannedGoal and PlannedObjective objects
       const plannedGoals = goalIds.map(goalId => ({
         goal_id: goalId,
@@ -290,25 +501,68 @@ export function EditAppointmentModal({
         pre_session_notes: objectivePreSessionNotes[objectiveId] || undefined
       }));
 
-      const appointmentData = {
-        id: appointment.id,
-        student_id: selectedStudent.id,
-        start_datetime: formatLocalDateTime(startDateTime),
-        end_datetime: formatLocalDateTime(endDateTime),
-        notes: sessionNotes.trim() || undefined,
-        planned_goals: plannedGoals.length > 0 ? plannedGoals : undefined,
-        planned_objectives: plannedObjectives.length > 0 ? plannedObjectives : undefined
-      };
+      if (analysis.type === 'time_only') {
+        // Simple time update - use existing API
+        const seriesUpdateData = {
+          student_id: selectedStudent.id,
+          start_datetime: formatLocalDateTime(startDateTime),
+          end_datetime: formatLocalDateTime(endDateTime),
+          notes: sessionNotes.trim() || undefined,
+          planned_goals: plannedGoals.length > 0 ? plannedGoals : undefined,
+          planned_objectives: plannedObjectives.length > 0 ? plannedObjectives : undefined
+        };
 
-      console.log('🔄 Edit Appointment - Submitting:', appointmentData);
-      await onUpdateAppointment(appointmentData);
+        console.log('🔄 Edit Series (Time Only) - Submitting:', seriesUpdateData);
+        await schedulingApi.updateAppointmentSeries(appointment.series_id, seriesUpdateData);
+      } else {
+        // Date changed - use pattern update API
+        const patternUpdateData: SeriesPatternUpdate = {
+          update_type: updateType || 'offset_only',
+          start_datetime: formatLocalDateTime(startDateTime),
+          end_datetime: formatLocalDateTime(endDateTime),
+          date_offset_days: analysis.offsetDays,
+          target_day_of_week: analysis.newDayOfWeek,
+          notes: sessionNotes.trim() || undefined,
+          planned_goals: plannedGoals.length > 0 ? plannedGoals : undefined,
+          planned_objectives: plannedObjectives.length > 0 ? plannedObjectives : undefined
+        };
+
+        console.log('🔄 Edit Series (Pattern) - Submitting:', patternUpdateData);
+        await schedulingApi.updateAppointmentSeriesPattern(appointment.series_id, patternUpdateData);
+      }
+      
+      console.log('✅ Series updated successfully');
+      
+      // Trigger data refresh without updating individual appointment
+      if (onSeriesUpdate) {
+        await onSeriesUpdate();
+      }
+      
       onClose();
     } catch (err) {
-      console.error('❌ Edit Appointment Error:', err);
-      setError(err instanceof Error ? err.message : 'Failed to update appointment');
+      console.error('❌ Edit Series Error:', err);
+      setError(err instanceof Error ? err.message : 'Failed to update appointment series');
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleSeriesActionClose = () => {
+    setSeriesActionDialogOpen(false);
+    setPendingAction(null);
+  };
+
+  const handlePatternDialogClose = () => {
+    setSeriesPatternDialogOpen(false);
+    setPatternAnalysis(null);
+  };
+
+  const handleOffsetUpdate = async () => {
+    await performSeriesEdit('offset_only');
+  };
+
+  const handleDayAlignmentUpdate = async () => {
+    await performSeriesEdit('day_alignment');
   };
 
   const handleClose = () => {
@@ -334,11 +588,25 @@ export function EditAppointmentModal({
           pb: 1
         }}>
           <Box>
-            <Typography variant="h6" component="div">
-              Edit Appointment
-            </Typography>
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+              <Typography variant="h6" component="div">
+                Edit Appointment
+              </Typography>
+              {appointment.series_id && (
+                <Chip 
+                  icon={<Repeat />} 
+                  label="Recurring Series" 
+                  size="small" 
+                  color="primary"
+                  variant="outlined"
+                />
+              )}
+            </Box>
             <Typography variant="subtitle2" color="text.secondary">
-              Modify appointment details and goals
+              {appointment.series_id 
+                ? "This appointment is part of a recurring series"
+                : "Modify appointment details and goals"
+              }
             </Typography>
           </Box>
           <IconButton onClick={handleClose} size="small">
@@ -347,6 +615,15 @@ export function EditAppointmentModal({
         </DialogTitle>
 
         <DialogContent dividers sx={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+          {!canModify && (
+            <Alert severity="warning">
+              <Typography variant="subtitle2" fontWeight={600}>
+                Cannot Edit Appointment
+              </Typography>
+              {modificationCheck.reason}. This appointment is protected from modifications.
+            </Alert>
+          )}
+
           {error && (
             <Alert severity="error" onClose={() => setError(null)}>
               {error}
@@ -385,38 +662,66 @@ export function EditAppointmentModal({
             </Grid>
           </Grid>
 
-          {/* Time Selection - Same as Create Modal */}
-          <Box sx={{ display: 'flex', gap: 2, mb: 2 }}>
-            <FormControl fullWidth>
-              <InputLabel>Start Time</InputLabel>
-              <Select
-                value={startTime}
-                label="Start Time"
-                onChange={(e) => setStartTime(e.target.value)}
-              >
-                {timeOptions.map((option) => (
-                  <MenuItem key={option.value} value={option.value}>
-                    {option.label}
-                  </MenuItem>
-                ))}
-              </Select>
-            </FormControl>
+          {/* Date Selection */}
+          <Box sx={{ mb: 3 }}>
+            <Typography variant="subtitle1" gutterBottom sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+              <Schedule color="primary" />
+              Appointment Date & Time
+            </Typography>
+            
+            <Grid container spacing={2}>
+              <Grid item xs={12} md={4}>
+                <DatePicker
+                  label="Appointment Date"
+                  value={selectedDate}
+                  onChange={(newDate) => setSelectedDate(newDate || new Date())}
+                  minDate={new Date()} // Prevent scheduling in the past
+                  disabled={!canModify}
+                  slotProps={{
+                    textField: {
+                      fullWidth: true,
+                      helperText: canModify ? "Select the date for this appointment" : "Cannot modify protected appointment"
+                    }
+                  }}
+                />
+              </Grid>
+              
+              <Grid item xs={12} md={4}>
+                <FormControl fullWidth>
+                  <InputLabel>Start Time</InputLabel>
+                  <Select
+                    value={startTime}
+                    label="Start Time"
+                    onChange={(e) => setStartTime(e.target.value)}
+                    disabled={!canModify}
+                  >
+                    {timeOptions.map((option) => (
+                      <MenuItem key={option.value} value={option.value}>
+                        {option.label}
+                      </MenuItem>
+                    ))}
+                  </Select>
+                </FormControl>
+              </Grid>
 
-            <FormControl fullWidth>
-              <InputLabel>End Time</InputLabel>
-              <Select
-                value={endTime}
-                label="End Time"
-                onChange={(e) => setEndTime(e.target.value)}
-                disabled={!startTime}
-              >
-                {timeOptions.map((option) => (
-                  <MenuItem key={option.value} value={option.value}>
-                    {option.label}
-                  </MenuItem>
-                ))}
-              </Select>
-            </FormControl>
+              <Grid item xs={12} md={4}>
+                <FormControl fullWidth>
+                  <InputLabel>End Time</InputLabel>
+                  <Select
+                    value={endTime}
+                    label="End Time"
+                    onChange={(e) => setEndTime(e.target.value)}
+                    disabled={!canModify || !startTime}
+                  >
+                    {timeOptions.map((option) => (
+                      <MenuItem key={option.value} value={option.value}>
+                        {option.label}
+                      </MenuItem>
+                    ))}
+                  </Select>
+                </FormControl>
+              </Grid>
+            </Grid>
           </Box>
 
           <FormControlLabel
@@ -437,7 +742,8 @@ export function EditAppointmentModal({
             value={sessionNotes}
             onChange={(e) => setSessionNotes(e.target.value)}
             fullWidth
-            placeholder="Add any notes about this appointment..."
+            disabled={!canModify}
+            placeholder={canModify ? "Add any notes about this appointment..." : "Cannot modify notes for protected appointment"}
           />
 
           {/* Goals Selection - Exact same structure as create modal */}
@@ -703,12 +1009,17 @@ export function EditAppointmentModal({
             </Box>
           )}
 
-          {/* Recurring Schedule */}
-          <Divider />
-          <RecurringSchedule
-            value={recurringConfig}
-            onChange={setRecurringConfig}
-          />
+          {/* Recurring Schedule - Only show for non-series appointments */}
+          {!appointment.series_id && (
+            <>
+              <Divider />
+              <RecurringSchedule
+                value={recurringConfig}
+                onChange={setRecurringConfig}
+                startDate={selectedDate}
+              />
+            </>
+          )}
         </DialogContent>
 
         <DialogActions sx={{ px: 3, py: 2 }}>
@@ -718,13 +1029,48 @@ export function EditAppointmentModal({
           <Button
             onClick={handleSubmit}
             variant="contained"
-            disabled={!canSubmit || loading || hasConflicts}
+            disabled={!canSubmit || loading || hasConflicts || !canModify}
             sx={{ minWidth: 120 }}
           >
-            {loading ? 'Updating...' : 'Update Appointment'}
+            {loading 
+              ? 'Updating...' 
+              : (recurringConfig.isRecurring && !appointment.series_id)
+                ? 'Create Recurring Series'
+                : 'Update Appointment'
+            }
           </Button>
         </DialogActions>
       </Dialog>
+
+      {/* Series Action Dialog */}
+      {appointment.series_id && (
+        <SeriesActionDialog
+          open={seriesActionDialogOpen}
+          onClose={handleSeriesActionClose}
+          appointment={appointment}
+          action={pendingAction || 'edit'}
+          onSingleAction={performSingleEdit}
+          onSeriesAction={() => performSeriesEdit()}
+        />
+      )}
+
+      {/* Series Pattern Dialog */}
+      {appointment.series_id && patternAnalysis && (
+        <SeriesPatternDialog
+          open={seriesPatternDialogOpen}
+          onClose={handlePatternDialogClose}
+          appointment={appointment}
+          originalDate={new Date(appointment.start_datetime)}
+          newDate={selectedDate}
+          offsetDays={patternAnalysis.offsetDays}
+          dayOfWeekChanged={patternAnalysis.dayOfWeekChanged}
+          originalDayOfWeek={patternAnalysis.originalDayOfWeek}
+          newDayOfWeek={patternAnalysis.newDayOfWeek}
+          onSingleUpdate={performSingleEdit}
+          onOffsetUpdate={handleOffsetUpdate}
+          onDayAlignmentUpdate={handleDayAlignmentUpdate}
+        />
+      )}
     </LocalizationProvider>
   );
 }

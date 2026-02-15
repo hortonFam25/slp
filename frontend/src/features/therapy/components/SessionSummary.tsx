@@ -79,8 +79,8 @@ export function SessionSummary({
   const workedOnObjectives = session.session_objectives?.filter(so => so.worked_on) || [];
   
   // Calculate session duration
-  const sessionDuration = session.start_time ? 
-    Math.round((new Date().getTime() - new Date(session.start_time).getTime()) / (1000 * 60)) : 
+  const sessionDuration = (session.actual_start_time || session.start_time) ? 
+    Math.round((new Date().getTime() - new Date((session.actual_start_time || session.start_time) as string).getTime()) / (1000 * 60)) : 
     session.planned_duration_minutes || 0;
 
   const getGoalDetails = (goalId: number) => {

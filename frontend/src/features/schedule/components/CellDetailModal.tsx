@@ -16,7 +16,7 @@ import {
   useMediaQuery,
   useTheme
 } from '@mui/material';
-import { 
+import {
   Close, 
   Person, 
   Group, 
@@ -26,7 +26,8 @@ import {
   AccessTime,
   School,
   PersonOutline,
-  Delete
+  Delete,
+  Lock
 } from '@mui/icons-material';
 import { format, addMinutes, isSameDay, startOfDay, setHours, setMinutes, differenceInMinutes } from 'date-fns';
 import { useNavigate } from 'react-router-dom';
@@ -36,7 +37,32 @@ import { useStartTherapySession } from '../../../lib/hooks/useTherapySessions';
 import { StartSessionRequest } from '../../../lib/api/therapySessions';
 import { EditAppointmentModal } from './EditAppointmentModal';
 import { EditTimeBlockModal } from './EditTimeBlockModal';
+import { SeriesActionDialog } from './SeriesActionDialog';
+import { ProtectedAppointmentModal } from './ProtectedAppointmentModal';
 import { ConfirmationModal } from '../../../components/ui/ConfirmationModal';
+
+// Helper function to check if appointment can be modified
+const canModifyAppointment = (appointment: AppointmentSummary): { canModify: boolean; reason?: string } => {
+  // Primary check: therapy session status
+  if (appointment.therapy_session_status) {
+    if (appointment.therapy_session_status === 'completed') {
+      return { canModify: false, reason: "This therapy session has been completed" };
+    }
+    if (appointment.therapy_session_status === 'in_progress') {
+      return { canModify: false, reason: "This therapy session is currently in progress" };
+    }
+  }
+  
+  // Secondary check: appointment timing
+  const now = new Date();
+  const appointmentStart = new Date(appointment.start_datetime);
+  
+  if (appointmentStart < now && !appointment.therapy_session_status) {
+    return { canModify: false, reason: "This appointment has already started" };
+  }
+  
+  return { canModify: true };
+};
 
 interface CellDetailModalProps {
   open: boolean;
@@ -52,6 +78,7 @@ interface CellDetailModalProps {
   onDeleteAppointment?: (appointment: AppointmentSummary) => void;
   onDeleteTimeBlock?: (timeBlock: TimeBlockSummary) => void;
   onUpdateAppointment?: (appointmentData: any) => void;
+  onSeriesUpdate?: () => Promise<void>; // New callback for series updates
   onUpdateTimeBlock?: (timeBlockData: any) => void;
   onLoadTherapySession?: (appointmentId: number) => Promise<{
     goals: Array<{ goal_id: number; goal_text: string; planned: boolean; worked_on: boolean }>;
@@ -96,6 +123,7 @@ export function CellDetailModal({
   onDeleteAppointment,
   onDeleteTimeBlock,
   onUpdateAppointment,
+  onSeriesUpdate,
   onUpdateTimeBlock,
   onLoadTherapySession
 }: CellDetailModalProps) {
@@ -122,6 +150,50 @@ export function CellDetailModal({
     item: AppointmentSummary | TimeBlockSummary;
   } | null>(null);
   const [deleteLoading, setDeleteLoading] = useState(false);
+  
+  // State for series action dialog
+  const [seriesActionDialogOpen, setSeriesActionDialogOpen] = useState(false);
+  const [appointmentForSeriesAction, setAppointmentForSeriesAction] = useState<AppointmentSummary | null>(null);
+  const [seriesActionType, setSeriesActionType] = useState<'edit' | 'delete'>('delete');
+  
+  // State for protected appointment modal
+  const [protectedModalOpen, setProtectedModalOpen] = useState(false);
+  const [protectedAppointment, setProtectedAppointment] = useState<AppointmentSummary | null>(null);
+  const [protectedAction, setProtectedAction] = useState<'edit' | 'delete'>('edit');
+  const [protectedReason, setProtectedReason] = useState('');
+  
+  // State for time block detail data
+  const [timeBlockDetails, setTimeBlockDetails] = useState<{[key: number]: any}>({});
+  
+  // Load time block details when needed
+  const loadTimeBlockDetails = async (timeBlockId: number) => {
+    if (timeBlockDetails[timeBlockId]) {
+      return timeBlockDetails[timeBlockId]; // Already loaded
+    }
+    
+    try {
+      const { schedulingApi } = await import('../../../lib/api/scheduling');
+      const [detailedData, appointmentsData] = await Promise.all([
+        schedulingApi.getTimeBlockDetailed(timeBlockId),
+        schedulingApi.getTimeBlockAppointments(timeBlockId)
+      ]);
+      
+      const details = {
+        ...detailedData,
+        appointments: appointmentsData
+      };
+      
+      setTimeBlockDetails(prev => ({
+        ...prev,
+        [timeBlockId]: details
+      }));
+      
+      return details;
+    } catch (error) {
+      console.error(`Failed to load time block ${timeBlockId} details:`, error);
+      return null;
+    }
+  };
   
   // Generate time slots from 8 AM to 4 PM in 5-minute intervals
   const timeSlots = useMemo<TimeSlot[]>(() => {
@@ -274,8 +346,17 @@ export function CellDetailModal({
   };
   
   const handleAppointmentClick = (appointment: AppointmentSummary) => {
-    setSelectedAppointmentForEdit(appointment);
-    setEditAppointmentModalOpen(true);
+    const modificationCheck = canModifyAppointment(appointment);
+    
+    if (!modificationCheck.canModify) {
+      setProtectedAppointment(appointment);
+      setProtectedAction('edit');
+      setProtectedReason(modificationCheck.reason || 'Unknown reason');
+      setProtectedModalOpen(true);
+    } else {
+      setSelectedAppointmentForEdit(appointment);
+      setEditAppointmentModalOpen(true);
+    }
   };
   
   const handleStartSession = async (appointment: AppointmentSummary, e: React.MouseEvent) => {
@@ -341,8 +422,26 @@ export function CellDetailModal({
   // Handle delete with confirmation modal
   const handleDeleteAppointment = (appointment: AppointmentSummary, e: React.MouseEvent) => {
     e.stopPropagation();
-    setItemToDelete({ type: 'appointment', item: appointment });
-    setDeleteConfirmationOpen(true);
+    
+    const modificationCheck = canModifyAppointment(appointment);
+    
+    if (!modificationCheck.canModify) {
+      setProtectedAppointment(appointment);
+      setProtectedAction('delete');
+      setProtectedReason(modificationCheck.reason || 'Unknown reason');
+      setProtectedModalOpen(true);
+      return;
+    }
+    
+    // Check if this appointment is part of a series
+    if (appointment.series_id) {
+      setAppointmentForSeriesAction(appointment);
+      setSeriesActionType('delete');
+      setSeriesActionDialogOpen(true);
+    } else {
+      setItemToDelete({ type: 'appointment', item: appointment });
+      setDeleteConfirmationOpen(true);
+    }
   };
 
   const handleDeleteTimeBlock = (timeBlock: TimeBlockSummary, e: React.MouseEvent) => {
@@ -379,6 +478,42 @@ export function CellDetailModal({
       console.error('Delete failed:', error);
       setDeleteLoading(false);
       // Keep the confirmation modal open to show the error or let user retry
+    }
+  };
+
+  // Handle series action dialog
+  const handleSeriesActionClose = () => {
+    setSeriesActionDialogOpen(false);
+    setAppointmentForSeriesAction(null);
+  };
+
+  const handleSingleAppointmentDelete = async () => {
+    if (!appointmentForSeriesAction) return;
+    
+    try {
+      await onDeleteAppointment?.(appointmentForSeriesAction);
+      handleSeriesActionClose();
+    } catch (error) {
+      console.error('Failed to delete single appointment:', error);
+    }
+  };
+
+  const handleSeriesDelete = async () => {
+    if (!appointmentForSeriesAction?.series_id) return;
+    
+    try {
+      const { schedulingApi } = await import('../../../lib/api/scheduling');
+      await schedulingApi.deleteAppointmentSeries(appointmentForSeriesAction.series_id);
+      console.log('✅ Series deleted successfully');
+      
+      // Trigger data refresh without individual appointment deletion
+      if (onSeriesUpdate) {
+        await onSeriesUpdate();
+      }
+      
+      handleSeriesActionClose();
+    } catch (error) {
+      console.error('Failed to delete appointment series:', error);
     }
   };
   
@@ -540,6 +675,8 @@ export function CellDetailModal({
                 {appointmentBlocks.map((block, index) => {
                   const topPosition = block.startSlotIndex * 35;
                   const height = block.durationSlots * 35 - 2; // Subtract 2px for border spacing
+                  const modificationCheck = canModifyAppointment(block.appointment);
+                  const canModify = modificationCheck.canModify;
                   
                   return (
                     <Paper
@@ -551,19 +688,34 @@ export function CellDetailModal({
                         left: 8,
                         right: 8,
                         height: height,
-                        backgroundColor: block.isSelected ? 'primary.main' : 'primary.light',
-                        color: block.isSelected ? 'white' : 'primary.contrastText',
+                        backgroundColor: !canModify 
+                          ? (block.appointment.therapy_session_status === 'completed' 
+                              ? (block.isSelected ? '#2E7A85' : '#41AAB7') 
+                              : (block.isSelected ? 'grey.700' : 'grey.600'))
+                          : (block.isSelected ? 'primary.main' : 'primary.light'),
+                        color: !canModify 
+                          ? 'white'
+                          : (block.isSelected ? 'white' : 'primary.contrastText'),
                         border: '1px solid',
-                        borderColor: block.isSelected ? 'primary.dark' : 'primary.main',
+                        borderColor: !canModify 
+                          ? (block.appointment.therapy_session_status === 'completed' ? '#41AAB7' : 'grey.600')
+                          : (block.isSelected ? 'primary.dark' : 'primary.main'),
                         cursor: 'pointer',
                         p: 1,
                         display: 'flex',
                         flexDirection: 'column',
                         justifyContent: 'space-between',
                         overflow: 'hidden',
+                        opacity: !canModify ? 0.8 : 1,
                         '&:hover': {
-                          backgroundColor: block.isSelected ? 'primary.dark' : 'primary.main',
-                          borderColor: 'primary.dark'
+                          backgroundColor: !canModify 
+                            ? (block.appointment.therapy_session_status === 'completed' 
+                                ? (block.isSelected ? '#2E7A85' : '#358A96') 
+                                : (block.isSelected ? 'grey.800' : 'grey.700'))
+                            : (block.isSelected ? 'primary.dark' : 'primary.main'),
+                          borderColor: !canModify 
+                            ? (block.appointment.therapy_session_status === 'completed' ? '#358A96' : 'grey.700')
+                            : 'primary.dark'
                         },
                         zIndex: block.isSelected ? 10 : 5
                       }}
@@ -577,6 +729,9 @@ export function CellDetailModal({
                           </Typography>
                           {block.appointment.series_id && (
                             <Repeat fontSize="small" />
+                          )}
+                          {!canModify && (
+                            <Lock fontSize="small" sx={{ opacity: 0.7 }} />
                           )}
                         </Box>
                         
@@ -592,7 +747,7 @@ export function CellDetailModal({
                       </Box>
                       
                       <Box sx={{ display: 'flex', gap: 0.5, justifyContent: 'flex-end' }}>
-                        <Tooltip title="Edit Appointment">
+                        <Tooltip title={canModify ? "Edit Appointment" : `Cannot edit: ${modificationCheck.reason}`}>
                           <IconButton 
                             size="small"
                             onClick={(e) => {
@@ -601,25 +756,37 @@ export function CellDetailModal({
                             }}
                             sx={{ 
                               color: 'inherit',
-                              backgroundColor: 'rgba(255,255,255,0.2)',
-                              '&:hover': { backgroundColor: 'rgba(255,255,255,0.3)' }
+                              backgroundColor: !canModify 
+                                ? 'rgba(128,128,128,0.6)'
+                                : 'rgba(255,255,255,0.2)',
+                              '&:hover': { 
+                                backgroundColor: !canModify 
+                                  ? 'rgba(128,128,128,0.8)'
+                                  : 'rgba(255,255,255,0.3)' 
+                              }
                             }}
                           >
-                            <Edit fontSize="small" />
+                            {!canModify ? <Lock fontSize="small" /> : <Edit fontSize="small" />}
                           </IconButton>
                         </Tooltip>
                         
-                        <Tooltip title="Delete Appointment">
+                        <Tooltip title={canModify ? "Delete Appointment" : `Cannot delete: ${modificationCheck.reason}`}>
                           <IconButton 
                             size="small"
                             onClick={(e) => handleDeleteAppointment(block.appointment, e)}
                             sx={{ 
                               color: 'inherit',
-                              backgroundColor: 'rgba(244,67,54,0.8)',
-                              '&:hover': { backgroundColor: 'rgba(244,67,54,1)' }
+                              backgroundColor: !canModify 
+                                ? 'rgba(128,128,128,0.6)'
+                                : 'rgba(244,67,54,0.8)',
+                              '&:hover': { 
+                                backgroundColor: !canModify 
+                                  ? 'rgba(128,128,128,0.8)'
+                                  : 'rgba(244,67,54,1)' 
+                              }
                             }}
                           >
-                            <Delete fontSize="small" />
+                            {!canModify ? <Lock fontSize="small" /> : <Delete fontSize="small" />}
                           </IconButton>
                         </Tooltip>
                         
@@ -674,23 +841,163 @@ export function CellDetailModal({
                       }}
                       onClick={() => handleTimeBlockClick(block.timeBlock)}
                     >
-                      <Box sx={{ flex: 1, overflow: 'hidden' }}>
-                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mb: 0.5 }}>
-                          <Group fontSize="small" />
-                          <Typography variant="subtitle2" fontWeight={600} noWrap>
-                            {block.timeBlock.title || 'Group'}
+                      <Box sx={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column', gap: 1, p: 0.5 }}>
+                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                          <Group fontSize="medium" />
+                          <Typography variant="subtitle1" fontWeight={600} sx={{ 
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                            flex: 1,
+                            minWidth: 0,
+                            fontSize: '1rem'
+                          }}>
+                            {block.timeBlock.title || 'Group Therapy'}
                           </Typography>
                           <Badge badgeContent={block.timeBlock.current_student_count || 0} color="secondary" max={99} />
                         </Box>
                         
-                        <Typography variant="caption" sx={{ opacity: 0.9 }}>
+                        <Typography variant="body2" sx={{ opacity: 0.95, fontWeight: 600, fontSize: '0.875rem' }}>
                           {format(new Date(block.timeBlock.start_datetime!), 'h:mm a')} - {format(new Date(block.timeBlock.end_datetime!), 'h:mm a')}
                         </Typography>
                         
-                        {block.timeBlock.location && (
-                          <Typography variant="caption" sx={{ display: 'block', opacity: 0.8 }}>
-                            {block.timeBlock.location}
+                        {block.timeBlock.teacher_name && (
+                          <Typography variant="body2" sx={{ opacity: 0.9, fontStyle: 'italic', fontSize: '0.8rem' }}>
+                            👨‍🏫 {block.timeBlock.teacher_name}
                           </Typography>
+                        )}
+                        
+                        {block.timeBlock.location && (
+                          <Typography variant="body2" sx={{ opacity: 0.9, fontSize: '0.8rem' }}>
+                            📍 {block.timeBlock.location}
+                          </Typography>
+                        )}
+                        
+                        {/* Activities Section */}
+                        {block.timeBlock.current_student_count && block.timeBlock.current_student_count > 0 && (
+                          <Box sx={{ mt: 1, maxHeight: height - 120, overflow: 'auto' }}>
+                            {/* Load and display activities for this time block */}
+                            <TimeBlockActivitiesDisplay timeBlockId={block.timeBlock.id} />
+                            
+                            {/* Time Allocation Section */}
+                            <Box sx={{ mt: 1, pt: 1, borderTop: '1px solid rgba(255,255,255,0.2)' }}>
+                              <Typography variant="caption" sx={{ fontSize: '0.7rem', fontWeight: 'bold', opacity: 0.8, mb: 0.5, display: 'block' }}>
+                                TIME ALLOCATION
+                              </Typography>
+                              {/* Get actual student names from appointments for this time block */}
+                              {(() => {
+                              const startTime = new Date(block.timeBlock.start_datetime!);
+                              const endTime = new Date(block.timeBlock.end_datetime!);
+                              const totalMinutes = differenceInMinutes(endTime, startTime);
+                              
+                              // First try to use cached time block details
+                              const details = timeBlockDetails[block.timeBlock.id];
+                              let timeBlockAppointments: any[] = [];
+                              
+                              if (details && details.appointments) {
+                                timeBlockAppointments = details.appointments.filter((apt: any) => 
+                                  isSameDay(new Date(apt.start_datetime), date)
+                                ).sort((a: any, b: any) => new Date(a.start_datetime).getTime() - new Date(b.start_datetime).getTime());
+                                console.log(`🔍 Using cached time block ${block.timeBlock.id} appointments:`, timeBlockAppointments.length);
+                              } else {
+                                // Fallback to general appointments array
+                                timeBlockAppointments = appointments.filter(apt => 
+                                  (apt as any).time_block_id === block.timeBlock.id && 
+                                  isSameDay(new Date(apt.start_datetime!), date)
+                                ).sort((a, b) => new Date(a.start_datetime!).getTime() - new Date(b.start_datetime!).getTime());
+                                
+                                console.log(`🔍 Time block ${block.timeBlock.id} appointments from general array:`, timeBlockAppointments.length);
+                                
+                                // If no appointments found, try to load details
+                                if (timeBlockAppointments.length === 0) {
+                                  loadTimeBlockDetails(block.timeBlock.id);
+                                }
+                              }
+                              
+                              // Prioritize assigned_students data if available (most reliable)
+                              const timeBlockWithStudents = block.timeBlock as any;
+                              if (timeBlockWithStudents.assigned_students && timeBlockWithStudents.assigned_students.length > 0) {
+                                console.log(`🔍 Using time block assigned_students:`, timeBlockWithStudents.assigned_students);
+                                
+                                const studentCount = timeBlockWithStudents.assigned_students.length;
+                                const minutesPerStudent = Math.floor(totalMinutes / studentCount / 5) * 5;
+                                
+                                return timeBlockWithStudents.assigned_students.map((student: any, i: number) => {
+                                  const slotStart = addMinutes(startTime, i * minutesPerStudent);
+                                  const slotEnd = addMinutes(slotStart, minutesPerStudent);
+                                  
+                                  return {
+                                    index: i + 1,
+                                    name: `${student.first} ${student.last}`,
+                                    startTime: slotStart,
+                                    endTime: slotEnd,
+                                    duration: minutesPerStudent
+                                  };
+                                });
+                              }
+                              
+                              if (timeBlockAppointments.length === 0) {
+                                
+                                // Final fallback: calculate generic slots
+                                const studentCount = block.timeBlock.current_student_count || 1;
+                                const minutesPerStudent = Math.floor(totalMinutes / studentCount / 5) * 5;
+                                
+                                const studentSlots = [];
+                                for (let i = 0; i < studentCount; i++) {
+                                  const slotStart = addMinutes(startTime, i * minutesPerStudent);
+                                  const slotEnd = addMinutes(slotStart, minutesPerStudent);
+                                  
+                                  studentSlots.push({
+                                    index: i + 1,
+                                    name: `Student ${i + 1}`,
+                                    startTime: slotStart,
+                                    endTime: slotEnd,
+                                    duration: minutesPerStudent
+                                  });
+                                }
+                                return studentSlots;
+                              }
+                              
+                              // Use actual appointment data for student names and times
+                              return timeBlockAppointments.map((apt, index) => ({
+                                index: index + 1,
+                                name: apt.student_name || `Student ${index + 1}`,
+                                startTime: new Date(apt.start_datetime!),
+                                endTime: new Date(apt.end_datetime!),
+                                duration: differenceInMinutes(new Date(apt.end_datetime!), new Date(apt.start_datetime!))
+                              }));
+                            })().map((slot, index) => (
+                              <Box key={index} sx={{ 
+                                display: 'flex', 
+                                alignItems: 'center', 
+                                gap: 1,
+                                mb: 0.5,
+                                opacity: 0.95,
+                                backgroundColor: 'rgba(255,255,255,0.1)',
+                                borderRadius: 1,
+                                p: 0.5
+                              }}>
+                                <Box sx={{ 
+                                  minWidth: 20,
+                                  height: 20,
+                                  borderRadius: '50%',
+                                  backgroundColor: 'rgba(255,255,255,0.4)',
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'center',
+                                  fontSize: '0.75rem',
+                                  fontWeight: 'bold',
+                                  color: 'secondary.main'
+                                }}>
+                                  {slot.index}
+                                </Box>
+                                <Typography variant="body2" sx={{ fontSize: '0.8rem', fontWeight: 500 }}>
+                                  {slot.name}: {format(slot.startTime, 'h:mm')} - {format(slot.endTime, 'h:mm')} ({slot.duration}m)
+                                </Typography>
+                              </Box>
+                            ))}
+                            </Box>
+                          </Box>
                         )}
                       </Box>
                       
@@ -777,6 +1084,7 @@ export function CellDetailModal({
         students={students}
         existingAppointments={appointments}
         onUpdateAppointment={handleUpdateAppointment}
+        onSeriesUpdate={onSeriesUpdate}
         onLoadTherapySession={onLoadTherapySession}
       />
     )}
@@ -808,6 +1116,108 @@ export function CellDetailModal({
       severity="error"
       loading={deleteLoading}
     />
+
+    {/* Series Action Dialog */}
+    {appointmentForSeriesAction && (
+      <SeriesActionDialog
+        open={seriesActionDialogOpen}
+        onClose={handleSeriesActionClose}
+        appointment={appointmentForSeriesAction}
+        action={seriesActionType}
+        onSingleAction={handleSingleAppointmentDelete}
+        onSeriesAction={handleSeriesDelete}
+      />
+    )}
+
+    {/* Protected Appointment Modal */}
+    {protectedAppointment && (
+      <ProtectedAppointmentModal
+        open={protectedModalOpen}
+        onClose={() => setProtectedModalOpen(false)}
+        appointment={protectedAppointment}
+        action={protectedAction}
+        reason={protectedReason}
+      />
+    )}
   </>
+  );
+}
+
+// Component to display activities for a time block
+interface TimeBlockActivitiesDisplayProps {
+  timeBlockId: number;
+}
+
+function TimeBlockActivitiesDisplay({ timeBlockId }: TimeBlockActivitiesDisplayProps) {
+  const [activities, setActivities] = React.useState<any[]>([]);
+  const [loading, setLoading] = React.useState(false);
+
+  React.useEffect(() => {
+    const loadActivities = async () => {
+      setLoading(true);
+      try {
+        const { schedulingApi } = await import('../../../lib/api/scheduling');
+        const activitiesData = await schedulingApi.getTimeBlockActivities(timeBlockId);
+        setActivities(activitiesData);
+      } catch (error) {
+        console.error(`Failed to load activities for time block ${timeBlockId}:`, error);
+        setActivities([]);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    if (timeBlockId) {
+      loadActivities();
+    }
+  }, [timeBlockId]);
+
+  if (loading) {
+    return (
+      <Typography variant="caption" sx={{ fontSize: '0.7rem', opacity: 0.8 }}>
+        Loading activities...
+      </Typography>
+    );
+  }
+
+  if (activities.length === 0) {
+    return (
+      <Typography variant="caption" sx={{ fontSize: '0.7rem', opacity: 0.6, fontStyle: 'italic' }}>
+        No activities planned
+      </Typography>
+    );
+  }
+
+  return (
+    <Box sx={{ mb: 1 }}>
+      <Typography variant="caption" sx={{ fontSize: '0.7rem', fontWeight: 'bold', opacity: 0.8, mb: 0.5, display: 'block' }}>
+        ACTIVITIES
+      </Typography>
+      {activities.map((activity, index) => (
+        <Box key={activity.id || index} sx={{ 
+          mb: 0.5,
+          p: 0.5,
+          backgroundColor: 'rgba(255,255,255,0.1)',
+          borderRadius: 1,
+          border: '1px solid rgba(255,255,255,0.2)'
+        }}>
+          <Typography variant="caption" sx={{ fontSize: '0.75rem', fontWeight: 'bold', display: 'block' }}>
+            🎯 {activity.activity_name}
+          </Typography>
+          <Typography variant="caption" sx={{ fontSize: '0.7rem', opacity: 0.9, display: 'block' }}>
+            {activity.start_datetime && activity.end_datetime ? (
+              `${format(new Date(activity.start_datetime), 'h:mm')} - ${format(new Date(activity.end_datetime), 'h:mm')} (${activity.duration_minutes}m)`
+            ) : (
+              `${activity.start_minute}m - ${activity.start_minute + activity.duration_minutes}m (${activity.duration_minutes}m)`
+            )}
+          </Typography>
+          {activity.assigned_students && activity.assigned_students.length > 0 && (
+            <Typography variant="caption" sx={{ fontSize: '0.65rem', opacity: 0.8, display: 'block', mt: 0.25 }}>
+              👥 {activity.assigned_students.map((student: any) => student.full_name).join(', ')}
+            </Typography>
+          )}
+        </Box>
+      ))}
+    </Box>
   );
 }

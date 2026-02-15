@@ -330,7 +330,12 @@ export function DailyScheduleView({ className, onAppointmentSelect }: DailySched
                         borderRadius: 2,
                         px: isMobile ? 2 : 1.5,
                         py: isMobile ? 0.75 : 1,
-                        textAlign: 'center'
+                        textAlign: 'center',
+                        display: 'flex',
+                        flexDirection: isMobile ? 'row' : 'column',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        gap: isMobile ? 0.5 : 0
                       }}
                     >
                       <Typography variant="body2" sx={{ 

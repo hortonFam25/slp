@@ -21,9 +21,14 @@ export function AppShell({ children }: PropsWithChildren) {
   const theme = useTheme();
   const isMobile = useMediaQuery(theme.breakpoints.down('sm'));
   const [mobileDrawerOpen, setMobileDrawerOpen] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
   
   const handleDrawerToggle = () => {
     setMobileDrawerOpen(!mobileDrawerOpen);
+  };
+
+  const handleSidebarToggle = () => {
+    setSidebarOpen(!sidebarOpen);
   };
   const signOut = () => {
     // Clear local session without Microsoft redirect
@@ -37,8 +42,8 @@ export function AppShell({ children }: PropsWithChildren) {
       height: '100vh', 
       overflow: 'hidden' // Prevent viewport scrolling
     }}>
-      {/* Desktop Sidebar - Hidden on Mobile */}
-      {!isMobile && <Sidebar />}
+      {/* Desktop Sidebar - Always shown but collapsible */}
+      {!isMobile && <Sidebar open={sidebarOpen} />}
       
       {/* Mobile Drawer */}
       {isMobile && (
@@ -70,19 +75,17 @@ export function AppShell({ children }: PropsWithChildren) {
         {/* Sticky Header */}
         <AppBar position="static" color="transparent" elevation={0} sx={{ flexShrink: 0 }}>
           <Toolbar className="flex items-center gap-4">
-            {/* Mobile Menu Button */}
-            {isMobile && (
-              <IconButton
-                edge="start"
-                onClick={handleDrawerToggle}
-                aria-label="open drawer"
-                sx={{ mr: 2 }}
-              >
-                <MenuIcon size={24} />
-              </IconButton>
-            )}
+            {/* Hamburger Menu Button - Always shown */}
+            <IconButton
+              edge="start"
+              onClick={isMobile ? handleDrawerToggle : handleSidebarToggle}
+              aria-label={isMobile ? "open drawer" : "toggle sidebar"}
+              sx={{ mr: 2 }}
+            >
+              <MenuIcon size={24} />
+            </IconButton>
             
-            <Typography variant="h6" className="font-semibold">SLP Pro</Typography>
+
             <div className="flex-1" />
             <IconButton onClick={toggle} size="small" aria-label="Toggle theme">
               {mode === 'dark' ? <Sun size={18} /> : <Moon size={18} />}

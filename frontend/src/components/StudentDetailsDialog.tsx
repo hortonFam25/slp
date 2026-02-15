@@ -51,9 +51,24 @@ function TabPanel(props: TabPanelProps) {
       hidden={value !== index}
       id={`student-tabpanel-${index}`}
       aria-labelledby={`student-tab-${index}`}
+      style={{ 
+        height: '100%', 
+        display: value === index ? 'flex' : 'none',
+        flexDirection: 'column'
+      }}
       {...other}
     >
-      {value === index && <Box sx={{ p: isMobile ? 2 : 3 }}>{children}</Box>}
+      {value === index && (
+        <Box sx={{ 
+          p: isMobile ? 2 : 3,
+          height: '100%',
+          overflow: 'auto',
+          display: 'flex',
+          flexDirection: 'column'
+        }}>
+          {children}
+        </Box>
+      )}
     </div>
   );
 }

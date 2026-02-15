@@ -27,6 +27,29 @@ import { AppointmentSummary, TimeBlockSummary } from '../../../lib/api/schedulin
 import { StudentScheduleView } from '../../../lib/api/schedulingStudents';
 import { UnscheduledStudentsPanel } from './UnscheduledStudentsPanel';
 
+// Helper function to check if appointment can be modified
+const canModifyAppointment = (appointment: AppointmentSummary): { canModify: boolean; reason?: string } => {
+  // Primary check: therapy session status
+  if (appointment.therapy_session_status) {
+    if (appointment.therapy_session_status === 'completed') {
+      return { canModify: false, reason: "This therapy session has been completed" };
+    }
+    if (appointment.therapy_session_status === 'in_progress') {
+      return { canModify: false, reason: "This therapy session is currently in progress" };
+    }
+  }
+  
+  // Secondary check: appointment timing
+  const now = new Date();
+  const appointmentStart = new Date(appointment.start_datetime);
+  
+  if (appointmentStart < now && !appointment.therapy_session_status) {
+    return { canModify: false, reason: "This appointment has already started" };
+  }
+  
+  return { canModify: true };
+};
+
 interface WeeklyCalendarDataGridProps {
   appointments: AppointmentSummary[];
   timeBlocks: TimeBlockSummary[];
@@ -403,49 +426,75 @@ export function WeeklyCalendarDataGrid({
                     {/* Show individual appointments or count bubble for current hour appointments */}
                     {shouldShowIndividualAppointments ? (
                       // Show individual appointments
-                      cellAppointments.map(appointment => (
-                        <Chip
-                          key={appointment.id}
-                          label={appointment.student_name || 'Unknown'}
-                          size="small"
-                          color="primary"
-                          icon={<Person />}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            onAppointmentClick?.(appointment);
-                          }}
-                          sx={{ 
-                            fontSize: isMobile ? '0.75rem' : '0.7rem',
-                            height: isMobile ? 24 : 20,
-                            width: '100%',
-                            '& .MuiChip-label': { px: 1 },
-                            '& .MuiChip-icon': { fontSize: isMobile ? 14 : 12 }
-                          }}
-                        />
-                      ))
+                      cellAppointments.map(appointment => {
+                        const modificationCheck = canModifyAppointment(appointment);
+                        const canModify = modificationCheck.canModify;
+                        
+                        return (
+                          <Chip
+                            key={appointment.id}
+                            label={appointment.student_name || 'Unknown'}
+                            size="small"
+                            color={canModify ? "primary" : "default"}
+                            icon={<Person />}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onAppointmentClick?.(appointment);
+                            }}
+                            sx={{ 
+                              fontSize: isMobile ? '0.75rem' : '0.7rem',
+                              height: isMobile ? 24 : 20,
+                              width: '100%',
+                              backgroundColor: !canModify 
+                                ? (appointment.therapy_session_status === 'completed' ? '#41AAB7' : 'grey.600')
+                                : undefined,
+                              color: !canModify ? 'white' : undefined,
+                              opacity: !canModify ? 0.9 : 1,
+                              '& .MuiChip-label': { px: 1 },
+                              '& .MuiChip-icon': { 
+                                fontSize: isMobile ? 14 : 12,
+                                color: !canModify ? 'white' : undefined
+                              }
+                            }}
+                          />
+                        );
+                      })
                     ) : cellAppointments.length > 0 ? (
                       // Show count bubble if there are appointments in this hour
-                      <Chip
-                        label={`${cellAppointments.length} Appointments`}
-                        size="small"
-                        color="primary"
-                        icon={<Person />}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          // Could show a popup with all appointments, or just click the first one
-                          onAppointmentClick?.(cellAppointments[0]);
-                        }}
-                        sx={{ 
-                          fontSize: isMobile ? '0.75rem' : '0.7rem',
-                          height: isMobile ? 24 : 20,
-                          width: '100%',
-                          '& .MuiChip-label': { px: 1 },
-                          '& .MuiChip-icon': { fontSize: isMobile ? 14 : 12 },
-                          bgcolor: 'primary.main',
-                          color: 'white',
-                          fontWeight: 600
-                        }}
-                      />
+                      (() => {
+                        const protectedCount = cellAppointments.filter(apt => !canModifyAppointment(apt).canModify).length;
+                        const hasProtected = protectedCount > 0;
+                        
+                        const completedCount = cellAppointments.filter(apt => apt.therapy_session_status === 'completed').length;
+                        const hasCompleted = completedCount > 0;
+                        
+                        return (
+                          <Chip
+                            label={`${cellAppointments.length} Appointment${cellAppointments.length > 1 ? 's' : ''}${hasProtected ? ` (${protectedCount} protected)` : ''}`}
+                            size="small"
+                            color={hasProtected ? "default" : "primary"}
+                            icon={<Person />}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              // Could show a popup with all appointments, or just click the first one
+                              onAppointmentClick?.(cellAppointments[0]);
+                            }}
+                            sx={{ 
+                              fontSize: isMobile ? '0.75rem' : '0.7rem',
+                              height: isMobile ? 24 : 20,
+                              width: '100%',
+                              '& .MuiChip-label': { px: 1 },
+                              '& .MuiChip-icon': { fontSize: isMobile ? 14 : 12 },
+                              bgcolor: hasProtected 
+                                ? (hasCompleted ? '#41AAB7' : 'grey.600')
+                                : 'primary.main',
+                              color: 'white',
+                              fontWeight: 600,
+                              opacity: hasProtected ? 0.9 : 1
+                            }}
+                          />
+                        );
+                      })()
                     ) : null}
                   </>
                 );

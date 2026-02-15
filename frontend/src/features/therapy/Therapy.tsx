@@ -32,6 +32,7 @@ import {
   Link,
   Psychology
 } from '@mui/icons-material';
+import { Stethoscope } from 'lucide-react';
 import { useStudents } from '../../lib/hooks/useStudents';
 import { useAppointments } from '../../lib/hooks/useScheduling';
 import { useStartTherapySession } from '../../lib/hooks/useTherapySessions';
@@ -117,26 +118,16 @@ export default function Therapy() {
             variant={isMobile ? "h5" : "h4"} 
             component="h1" 
             sx={{ 
-              mb: isMobile ? 1 : 2, 
               display: 'flex', 
               alignItems: 'center',
-              color: '#40A8B6',
-              fontWeight: 600,
-              fontSize: isMobile ? '1.5rem' : undefined
+              color: '#41AAB7',
+              fontWeight: 700,
+              fontSize: isMobile ? '1.5rem' : undefined,
+              gap: 2
             }}
           >
-            <MedicalServices sx={{ 
-              mr: isMobile ? 1 : 2, 
-              fontSize: isMobile ? 24 : 32 
-            }} />
-            Therapy Sessions
-          </Typography>
-          <Typography 
-            variant={isMobile ? "body1" : "h6"} 
-            color="text.secondary"
-            sx={{ fontSize: isMobile ? '0.9rem' : undefined }}
-          >
-            Select a student and date to begin a therapy session
+            <Stethoscope size={isMobile ? 24 : 32} />
+            Therapy
           </Typography>
         </Box>
 

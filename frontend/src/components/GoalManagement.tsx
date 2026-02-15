@@ -739,6 +739,24 @@ function GoalDialog({
 
   const [submitting, setSubmitting] = useState(false);
 
+  // Update form data when goal prop changes (for edit mode)
+  useEffect(() => {
+    if (open) {
+      setFormData({
+        goal_category_id: goal?.goal_category_id || '',
+        goal_number: goal?.goal_number || '',
+        goal_description: goal?.goal_description || '',
+        target_behavior: goal?.target_behavior || '',
+        baseline_data: goal?.baseline_data || '',
+        target_criteria: goal?.target_criteria || '',
+        goal_status: goal?.goal_status || 'Active',
+        start_date: goal?.start_date || new Date().toISOString().split('T')[0],
+        end_date: goal?.end_date || '',
+        mastery_date: goal?.mastery_date || ''
+      });
+    }
+  }, [open, goal]);
+
   const handleSubmit = async () => {
     try {
       setSubmitting(true);
@@ -951,6 +969,18 @@ function ObjectiveDialog({
   };
 
   const availableNumbers = getAvailableObjectiveNumbers();
+
+  // Update form data when objective prop changes (for edit mode)
+  useEffect(() => {
+    if (open) {
+      setFormData({
+        objective_number: objective?.objective_number || 1,
+        objective_description: objective?.objective_description || '',
+        progress_status: objective?.progress_status || '',
+        schedule_frequency: objective?.schedule_frequency || ''
+      });
+    }
+  }, [open, objective]);
 
   // Auto-select first available number if current selection is not available
   useEffect(() => {

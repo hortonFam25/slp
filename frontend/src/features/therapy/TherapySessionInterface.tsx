@@ -90,7 +90,7 @@ export function TherapySessionInterface({
         sessionId,
         sessionData: {
           status: 'in_progress',
-          start_time: new Date().toISOString()
+          actual_start_time: new Date().toISOString()
         }
       });
       setSessionStarted(true);
@@ -213,7 +213,7 @@ export function TherapySessionInterface({
                 >
                   {format(new Date(session.session_date), isMobile ? 'MMM d, yyyy' : 'EEEE, MMMM d, yyyy')}
                   {!isMobile && session.appointment_id && ' • Scheduled Appointment'}
-                  {!isMobile && session.start_time && ` • Started ${format(new Date(session.start_time), 'h:mm a')}`}
+                  {!isMobile && session.actual_start_time && ` • Started ${format(new Date(session.actual_start_time), 'h:mm a')}`}
                 </Typography>
               </Box>
             </Box>
@@ -329,7 +329,7 @@ export function TherapySessionInterface({
               sx={{ fontSize: isMobile ? '0.85rem' : undefined }}
             >
               This therapy session has been completed.
-              {session.end_time && ` Ended at ${format(new Date(session.end_time), 'h:mm a')}`}
+              {(session.actual_end_time || session.end_time) && ` Ended at ${format(new Date((session.actual_end_time || session.end_time) as string), 'h:mm a')}`}
             </Typography>
           </Alert>
         )}

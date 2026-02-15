@@ -41,6 +41,7 @@ import {
   Refresh,
   FilterList
 } from '@mui/icons-material';
+import { UserSquare2 } from 'lucide-react';
 import { useTeachers } from '../../lib/hooks/useTeachers';
 import { useSchools } from '../../lib/hooks/useSchools';
 import { TeacherForm } from './components/TeacherForm';
@@ -152,18 +153,15 @@ export default function Teachers() {
           variant="h4" 
           component="h1" 
           sx={{ 
-            mb: 2, 
             display: 'flex', 
             alignItems: 'center',
-            color: '#40A8B6',
-            fontWeight: 600
+            color: '#41AAB7',
+            fontWeight: 700,
+            gap: 2
           }}
         >
-          <TeacherIcon sx={{ mr: 2, fontSize: 32 }} />
-          Teacher Management
-        </Typography>
-        <Typography variant="h6" color="text.secondary">
-          Manage teachers, contact information, and school assignments
+          <UserSquare2 size={32} />
+          Teachers
         </Typography>
       </Box>
 

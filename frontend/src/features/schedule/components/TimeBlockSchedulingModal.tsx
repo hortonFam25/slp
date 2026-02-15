@@ -100,12 +100,15 @@ interface TimeBlockActivity {
   id?: number;
   start_minute: number;
   duration_minutes: number;
+  start_datetime?: string;
+  end_datetime?: string;
   activity_name: string;
   activity_type?: string;
   description?: string;
   materials_needed?: string;
   notes?: string;
   sequence_order: number;
+  assigned_student_ids?: number[];
 }
 
 // Student Goal Assignment interface
@@ -159,6 +162,18 @@ const generateTimeOptions = () => {
 
 const TIME_OPTIONS = generateTimeOptions();
 
+// Helper function to format datetime for local timezone (same as other modals)
+const formatLocalDateTime = (date: Date): string => {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  const hours = String(date.getHours()).padStart(2, '0');
+  const minutes = String(date.getMinutes()).padStart(2, '0');
+  const seconds = String(date.getSeconds()).padStart(2, '0');
+  
+  return `${year}-${month}-${day}T${hours}:${minutes}:${seconds}`;
+};
+
 // Activity types for dropdown
 const ACTIVITY_TYPES = [
   { value: 'warm_up', label: 'Warm Up' },
@@ -175,9 +190,9 @@ const ACTIVITY_TYPES = [
 const AM_PM_OPTIONS = [
   { value: 'AM', label: 'AM' },
   { value: 'PM', label: 'PM' },
-  { value: 'Morning', label: 'Morning' },
-  { value: 'Afternoon', label: 'Afternoon' },
-  { value: 'Evening', label: 'Evening' }
+  // { value: 'Morning', label: 'Morning' },
+  // { value: 'Afternoon', label: 'Afternoon' },
+  // { value: 'Evening', label: 'Evening' }
 ];
 
 export function TimeBlockSchedulingModal({
@@ -204,6 +219,8 @@ export function TimeBlockSchedulingModal({
   
   // Student assignment state
   const [selectedStudents, setSelectedStudents] = useState<StudentScheduleView[]>([]);
+  const [filteredStudents, setFilteredStudents] = useState<StudentScheduleView[]>([]);
+  const [loadingFilteredStudents, setLoadingFilteredStudents] = useState(false);
   const [studentGoalAssignments, setStudentGoalAssignments] = useState<{ [key: number]: StudentGoalAssignment }>({});
   const [studentGoalsData, setStudentGoalsData] = useState<{ [key: number]: any[] }>({});
   
@@ -230,6 +247,52 @@ export function TimeBlockSchedulingModal({
   useEffect(() => {
     fetchTeachersSummary(true); // active only = true
   }, [fetchTeachersSummary]);
+
+  // Load filtered students when teacher is selected
+  useEffect(() => {
+    const loadFilteredStudents = async () => {
+      if (teacherId && typeof teacherId === 'number') {
+        try {
+          setLoadingFilteredStudents(true);
+          const { schedulingApi } = await import('../../../lib/api/scheduling');
+          const eligibleStudents = await schedulingApi.getStudentsByTeacher(teacherId);
+          
+          // Convert StudentSummary to StudentScheduleView format
+          const scheduleViewStudents: StudentScheduleView[] = eligibleStudents.map(student => ({
+            id: student.id,
+            first: student.first,
+            last: student.last,
+            uic: student.uic || undefined,
+            grade_level: student.grade_level || undefined,
+            case_manager_name: null, // Will be populated from backend
+            enrollment_status: student.enrollment_status,
+            school_id: undefined,
+            school: null, // Will be populated if needed
+            teacher_assignments: [],
+            primary_teacher: null,
+            current_appointments: [],
+            appointment_count: 0,
+            has_appointments: false,
+            full_name: `${student.first} ${student.last}`,
+            school_name: 'School Assignment',
+            primary_teacher_name: 'Teacher Assignment'
+          }));
+          
+          setFilteredStudents(scheduleViewStudents);
+        } catch (error) {
+          console.error('Failed to load filtered students:', error);
+          setFilteredStudents([]);
+        } finally {
+          setLoadingFilteredStudents(false);
+        }
+      } else {
+        // No teacher selected, show all students
+        setFilteredStudents(students);
+      }
+    };
+
+    loadFilteredStudents();
+  }, [teacherId, students]);
 
   // Initialize times when modal opens
   useEffect(() => {
@@ -356,7 +419,8 @@ export function TimeBlockSchedulingModal({
       description: '',
       materials_needed: '',
       notes: '',
-      sequence_order: nextOrder
+      sequence_order: nextOrder,
+      assigned_student_ids: [] // Initialize empty student assignments
     };
     setActivities(prev => [...prev, newActivity]);
   };
@@ -641,10 +705,16 @@ export function TimeBlockSchedulingModal({
                 <Grid container spacing={2}>
                   <Grid item xs={12} md={6}>
                     <Autocomplete
-                      options={students.filter(s => !selectedStudents.find(sel => sel.id === s.id))}
+                      options={filteredStudents.filter(s => !selectedStudents.find(sel => sel.id === s.id))}
                       getOptionLabel={(student) => `${student.first} ${student.last} (${student.grade_level})`}
+                      loading={loadingFilteredStudents}
                       renderInput={(params) => (
-                        <TextField {...params} label="Add Student" placeholder="Search students..." />
+                        <TextField 
+                          {...params} 
+                          label="Add Student" 
+                          placeholder={teacherId ? "Students assigned to selected teacher/case manager..." : "Select a teacher first to see eligible students"}
+                          helperText={teacherId ? `Showing ${filteredStudents.length} eligible students` : "Select a teacher/case manager to filter students"}
+                        />
                       )}
                       onChange={(_, student) => {
                         if (student) {
@@ -794,52 +864,22 @@ export function TimeBlockSchedulingModal({
                         </Box>
 
                         <Grid container spacing={2}>
-                          <Grid item xs={12} md={3}>
-                            <FormControl fullWidth size="small">
-                              <InputLabel>Start Time</InputLabel>
-                              <Select
-                                value={activity.start_minute}
-                                onChange={(e) => {
-                                  const newStartMinute = e.target.value as number;
-                                  const maxEndMinute = Math.min(newStartMinute + activity.duration_minutes, blockDurationMinutes);
-                                  handleUpdateActivity(index, 'start_minute', newStartMinute);
-                                  if (newStartMinute + activity.duration_minutes > blockDurationMinutes) {
-                                    handleUpdateActivity(index, 'duration_minutes', blockDurationMinutes - newStartMinute);
-                                  }
-                                }}
-                              >
-                                {activityTimeOptions.filter(opt => opt.value < blockDurationMinutes).map(option => (
-                                  <MenuItem key={option.value} value={option.value}>
-                                    {option.label}
-                                  </MenuItem>
-                                ))}
-                              </Select>
-                            </FormControl>
+                          {/* Activity Name and Type */}
+                          <Grid item xs={12} md={6}>
+                            <TextField
+                              label="Activity Name"
+                              value={activity.activity_name}
+                              onChange={(e) => handleUpdateActivity(index, 'activity_name', e.target.value)}
+                              fullWidth
+                              size="small"
+                              required
+                              placeholder="e.g., Warm Up, Reading Practice"
+                            />
                           </Grid>
 
-                          <Grid item xs={12} md={3}>
+                          <Grid item xs={12} md={6}>
                             <FormControl fullWidth size="small">
-                              <InputLabel>End Time</InputLabel>
-                              <Select
-                                value={activity.start_minute + activity.duration_minutes}
-                                onChange={(e) => {
-                                  const endMinute = e.target.value as number;
-                                  const newDuration = endMinute - activity.start_minute;
-                                  handleUpdateActivity(index, 'duration_minutes', Math.max(5, newDuration));
-                                }}
-                              >
-                                {activityTimeOptions.filter(opt => opt.value > activity.start_minute && opt.value <= blockDurationMinutes).map(option => (
-                                  <MenuItem key={option.value} value={option.value}>
-                                    {option.label}
-                                  </MenuItem>
-                                ))}
-                              </Select>
-                            </FormControl>
-                          </Grid>
-
-                          <Grid item xs={12} md={3}>
-                            <FormControl fullWidth size="small">
-                              <InputLabel>Type</InputLabel>
+                              <InputLabel>Activity Type</InputLabel>
                               <Select
                                 value={activity.activity_type || ''}
                                 onChange={(e) => handleUpdateActivity(index, 'activity_type', e.target.value)}
@@ -853,17 +893,118 @@ export function TimeBlockSchedulingModal({
                             </FormControl>
                           </Grid>
 
-                          <Grid item xs={12} md={3}>
-                            <TextField
-                              label="Activity Name"
-                              value={activity.activity_name}
-                              onChange={(e) => handleUpdateActivity(index, 'activity_name', e.target.value)}
-                              fullWidth
-                              size="small"
-                              required
+                          {/* Time Selection */}
+                          <Grid item xs={12} md={6}>
+                            <TimePicker
+                              label="Activity Start Time"
+                              value={(() => {
+                                if (!startTime || !endTime) return null;
+                                const [blockStartHour, blockStartMinute] = startTime.split(':').map(Number);
+                                const activityStart = new Date(selectedDate);
+                                activityStart.setHours(blockStartHour, blockStartMinute + activity.start_minute, 0, 0);
+                                return activityStart;
+                              })()}
+                              onChange={(newTime) => {
+                                if (newTime && startTime) {
+                                  const [blockStartHour, blockStartMinute] = startTime.split(':').map(Number);
+                                  const blockStart = new Date(selectedDate);
+                                  blockStart.setHours(blockStartHour, blockStartMinute, 0, 0);
+                                  
+                                  const minutesFromBlockStart = Math.floor((newTime.getTime() - blockStart.getTime()) / (1000 * 60));
+                                  const clampedMinutes = Math.max(0, Math.min(minutesFromBlockStart, blockDurationMinutes - 5));
+                                  
+                                  handleUpdateActivity(index, 'start_minute', clampedMinutes);
+                                  
+                                  // Update datetime field (use local time format)
+                                  const activityStartDateTime = new Date(blockStart.getTime() + clampedMinutes * 60 * 1000);
+                                  const localDateTimeString = formatLocalDateTime(activityStartDateTime);
+                                  handleUpdateActivity(index, 'start_datetime', localDateTimeString);
+                                }
+                              }}
+                              slotProps={{
+                                textField: { 
+                                  size: 'small',
+                                  fullWidth: true,
+                                  helperText: "Must be within time block timeframe"
+                                }
+                              }}
                             />
                           </Grid>
 
+                          <Grid item xs={12} md={6}>
+                            <TimePicker
+                              label="Activity End Time"
+                              value={(() => {
+                                if (!startTime || !endTime) return null;
+                                const [blockStartHour, blockStartMinute] = startTime.split(':').map(Number);
+                                const activityEnd = new Date(selectedDate);
+                                activityEnd.setHours(blockStartHour, blockStartMinute + activity.start_minute + activity.duration_minutes, 0, 0);
+                                return activityEnd;
+                              })()}
+                              onChange={(newTime) => {
+                                if (newTime && startTime) {
+                                  const [blockStartHour, blockStartMinute] = startTime.split(':').map(Number);
+                                  const blockStart = new Date(selectedDate);
+                                  blockStart.setHours(blockStartHour, blockStartMinute, 0, 0);
+                                  
+                                  const minutesFromBlockStart = Math.floor((newTime.getTime() - blockStart.getTime()) / (1000 * 60));
+                                  const clampedEndMinutes = Math.max(activity.start_minute + 5, Math.min(minutesFromBlockStart, blockDurationMinutes));
+                                  
+                                  const newDuration = clampedEndMinutes - activity.start_minute;
+                                  handleUpdateActivity(index, 'duration_minutes', newDuration);
+                                  
+                                  // Update datetime field (use local time format)
+                                  const activityEndDateTime = new Date(blockStart.getTime() + clampedEndMinutes * 60 * 1000);
+                                  const localEndDateTimeString = formatLocalDateTime(activityEndDateTime);
+                                  handleUpdateActivity(index, 'end_datetime', localEndDateTimeString);
+                                }
+                              }}
+                              slotProps={{
+                                textField: { 
+                                  size: 'small',
+                                  fullWidth: true,
+                                  helperText: "Must end before time block ends"
+                                }
+                              }}
+                            />
+                          </Grid>
+
+                          {/* Student Assignment */}
+                          <Grid item xs={12}>
+                            <Autocomplete
+                              multiple
+                              options={selectedStudents}
+                              getOptionLabel={(student) => `${student.first} ${student.last}`}
+                              value={selectedStudents.filter(student => 
+                                activity.assigned_student_ids?.includes(student.id) || false
+                              )}
+                              onChange={(_, newValue) => {
+                                const studentIds = newValue.map(student => student.id);
+                                handleUpdateActivity(index, 'assigned_student_ids', studentIds);
+                              }}
+                              renderInput={(params) => (
+                                <TextField
+                                  {...params}
+                                  label="Assign Students to Activity"
+                                  placeholder="Select students who will participate in this activity..."
+                                  size="small"
+                                  helperText={`${activity.assigned_student_ids?.length || 0} student(s) assigned`}
+                                />
+                              )}
+                              renderTags={(value, getTagProps) =>
+                                value.map((student, index) => (
+                                  <Chip
+                                    key={student.id}
+                                    label={`${student.first} ${student.last}`}
+                                    size="small"
+                                    {...getTagProps({ index })}
+                                  />
+                                ))
+                              }
+                            />
+                          </Grid>
+
+                          {/* Description and Materials */}
                           <Grid item xs={12} md={6}>
                             <TextField
                               label="Description"
@@ -873,6 +1014,7 @@ export function TimeBlockSchedulingModal({
                               size="small"
                               multiline
                               rows={2}
+                              placeholder="Describe what happens in this activity..."
                             />
                           </Grid>
 
@@ -885,6 +1027,7 @@ export function TimeBlockSchedulingModal({
                               size="small"
                               multiline
                               rows={2}
+                              placeholder="List materials, tools, or resources needed..."
                             />
                           </Grid>
                         </Grid>

@@ -6,7 +6,7 @@ import { apiLogger } from '../utils/logger';
 export const apiClient = axios.create({
   baseURL: import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000',
   withCredentials: true,
-  timeout: 30000, // 30 second timeout
+  timeout: 120000, // 2 minute timeout for large imports
   headers: {
     'Content-Type': 'application/json',
   },

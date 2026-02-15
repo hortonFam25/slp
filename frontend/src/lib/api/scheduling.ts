@@ -36,6 +36,8 @@ export interface AppointmentSummary {
   location?: string;
   duration_minutes: number;
   series_id?: string;
+  notes?: string;
+  therapy_session_status?: string;
 }
 
 export interface AppointmentWithDetails extends Appointment {
@@ -122,6 +124,39 @@ export interface RecurringAppointmentResponse {
   total_created: number;
   conflicts?: string[];
   series_id?: string;
+}
+
+export interface SeriesUpdateResponse {
+  message: string;
+  updated_count: number;
+  appointments: Appointment[];
+}
+
+export interface SeriesPatternUpdate {
+  update_type: 'time_only' | 'offset_only' | 'day_alignment';
+  start_datetime?: string;
+  end_datetime?: string;
+  date_offset_days?: number;
+  target_day_of_week?: number;
+  notes?: string;
+  planned_goals?: Array<{
+    goal_id: number;
+    planned: boolean;
+    worked_on: boolean;
+    priority: number;
+  }>;
+  planned_objectives?: Array<{
+    objective_id: number;
+    goal_id: number;
+    planned: boolean;
+    worked_on: boolean;
+    priority: number;
+    pre_session_notes?: string;
+  }>;
+}
+
+export interface SeriesDeleteResponse {
+  message: string;
 }
 
 export interface TimeBlock {
@@ -232,12 +267,15 @@ export interface TimeBlockActivity {
   time_block_id: number;
   start_minute: number;
   duration_minutes: number;
+  start_datetime?: string;
+  end_datetime?: string;
   activity_name: string;
   activity_type?: string;
   description?: string;
   materials_needed?: string;
   notes?: string;
   sequence_order: number;
+  assigned_student_ids?: number[];
   created_date?: string;
   modified_date?: string;
   created_by?: string;
@@ -247,23 +285,29 @@ export interface TimeBlockActivityCreate {
   time_block_id: number;
   start_minute: number;
   duration_minutes: number;
+  start_datetime?: string;
+  end_datetime?: string;
   activity_name: string;
   activity_type?: string;
   description?: string;
   materials_needed?: string;
   notes?: string;
   sequence_order: number;
+  assigned_student_ids?: number[];
 }
 
 export interface TimeBlockActivityUpdate {
   start_minute?: number;
   duration_minutes?: number;
+  start_datetime?: string;
+  end_datetime?: string;
   activity_name?: string;
   activity_type?: string;
   description?: string;
   materials_needed?: string;
   notes?: string;
   sequence_order?: number;
+  assigned_student_ids?: number[];
 }
 
 // Enhanced Time Block types
@@ -397,6 +441,23 @@ class SchedulingApiService extends BaseApiService {
     return this.get<{ available_slots: string[] }>(`/students/${studentId}/available-slots?${params.toString()}`);
   }
 
+  // Series management methods
+  async getAppointmentSeries(seriesId: string): Promise<AppointmentSummary[]> {
+    return this.get<AppointmentSummary[]>(`/appointments/series/${seriesId}`);
+  }
+
+  async updateAppointmentSeries(seriesId: string, data: AppointmentUpdate): Promise<SeriesUpdateResponse> {
+    return this.put<SeriesUpdateResponse>(`/appointments/series/${seriesId}`, data);
+  }
+
+  async updateAppointmentSeriesPattern(seriesId: string, data: SeriesPatternUpdate): Promise<SeriesUpdateResponse> {
+    return this.put<SeriesUpdateResponse>(`/appointments/series/${seriesId}/pattern`, data);
+  }
+
+  async deleteAppointmentSeries(seriesId: string): Promise<SeriesDeleteResponse> {
+    return this.delete<SeriesDeleteResponse>(`/appointments/series/${seriesId}`);
+  }
+
   // Time Block methods
   async getTimeBlocks(filters: TimeBlockFilters): Promise<TimeBlockSummary[]> {
     const params = new URLSearchParams();
@@ -519,6 +580,14 @@ class SchedulingApiService extends BaseApiService {
     return this.get<TimeBlockWithActivities>(`/time-blocks/${timeBlockId}/detailed`);
   }
 
+  async getEligibleStudentsForTimeBlock(timeBlockId: number): Promise<StudentSummary[]> {
+    return this.get<StudentSummary[]>(`/time-blocks/${timeBlockId}/eligible-students`);
+  }
+
+  async getStudentsByTeacher(teacherId: number): Promise<StudentSummary[]> {
+    return this.get<StudentSummary[]>(`/students/by-teacher/${teacherId}`);
+  }
+
   // Create Time Block with Students and Activities
   async createTimeBlockWithScheduling(data: {
     // Time block fields
@@ -558,9 +627,20 @@ class SchedulingApiService extends BaseApiService {
 
     const timeBlock = await this.createTimeBlock(timeBlockData);
 
-    // Add students to the time block
+    // Add students to the time block with auto-scheduling (new enhanced system)
+    let totalCreated = 0;
+    let conflicts: string[] = [];
+    
     for (const studentId of data.assigned_students) {
-      await this.assignStudentToBlock(timeBlock.id, studentId);
+      try {
+        const result = await this.post(`/time-blocks/${timeBlock.id}/students/${studentId}?auto_create_appointments=true`, {});
+        if (result.created_appointments) {
+          totalCreated += result.created_appointments;
+        }
+      } catch (error) {
+        console.warn(`Failed to assign student ${studentId}:`, error);
+        conflicts.push(`Student ${studentId} assignment failed`);
+      }
     }
 
     // Add activities if provided
@@ -570,35 +650,130 @@ class SchedulingApiService extends BaseApiService {
           time_block_id: timeBlock.id,
           start_minute: activity.start_minute,
           duration_minutes: activity.duration_minutes,
+          start_datetime: activity.start_datetime,
+          end_datetime: activity.end_datetime,
           activity_name: activity.activity_name,
           activity_type: activity.activity_type,
           description: activity.description,
           materials_needed: activity.materials_needed,
           notes: activity.notes,
-          sequence_order: activity.sequence_order
+          sequence_order: activity.sequence_order,
+          assigned_student_ids: activity.assigned_student_ids || []
         };
         await this.createTimeBlockActivity(timeBlock.id, activityData);
       }
     }
 
-    // Schedule the time block (create appointments)
-    let scheduleResult: TimeBlockScheduleResponse | undefined;
-    const scheduleRequest: TimeBlockScheduleRequest = {
-      time_block_id: timeBlock.id,
-      recurring_config: data.recurring_config,
-      student_goal_assignments: data.student_goal_assignments
+    // Create a synthetic schedule result for the new system
+    const scheduleResult: TimeBlockScheduleResponse = {
+      appointments_created: data.assigned_students.map((studentId, index) => ({
+        appointment_id: 0, // Will be populated by backend
+        student_id: studentId,
+        student_name: `Student ${studentId}`,
+        appointment_time: timeBlock.start_datetime,
+        therapy_session_created: true,
+        goals_planned: 0,
+        objectives_planned: 0
+      })),
+      conflicts: conflicts.map(conflict => ({
+        student_id: 0,
+        student_name: 'Unknown',
+        conflict_time: timeBlock.start_datetime,
+        reason: conflict
+      })),
+      total_appointments: totalCreated,
+      total_conflicts: conflicts.length,
+      series_id: undefined,
+      schedule_dates: [timeBlock.start_datetime]
     };
-
-    try {
-      scheduleResult = await this.scheduleTimeBlock(scheduleRequest);
-    } catch (error) {
-      console.warn('Failed to schedule time block appointments:', error);
-    }
 
     return {
       time_block: timeBlock,
       schedule_result: scheduleResult
     };
+  }
+
+  // Create Recurring Time Blocks
+  async createRecurringTimeBlocks(data: {
+    // Time block fields
+    teacher_id?: number;
+    school_id?: number;
+    start_datetime: string;
+    end_datetime: string;
+    title: string;
+    max_students?: number;
+    location?: string;
+    notes?: string;
+    am_pm_indicator?: string;
+    // Student assignments
+    assigned_students: number[];
+    // Activities
+    activities?: TimeBlockActivity[];
+    // Recurring config
+    recurring_config: RecurringConfig;
+  }): Promise<{
+    time_blocks_created: TimeBlock[];
+    appointments_created: any[];
+    conflicts: string[];
+    total_time_blocks: number;
+    total_appointments: number;
+    total_conflicts: number;
+    series_id: string;
+    schedule_dates: string[];
+  }> {
+    const requestData = {
+      time_block_data: {
+        teacher_id: data.teacher_id,
+        school_id: data.school_id,
+        start_datetime: data.start_datetime,
+        end_datetime: data.end_datetime,
+        title: data.title,
+        max_students: data.max_students,
+        location: data.location,
+        notes: data.notes,
+        am_pm_indicator: data.am_pm_indicator
+      },
+      student_ids: data.assigned_students,
+      recurring_config: data.recurring_config,
+      activities_data: data.activities || []
+    };
+
+    return this.post('/time-blocks/recurring', requestData);
+  }
+
+  // Get Time Block Details (with activities and students)
+  async getTimeBlockDetailed(timeBlockId: number): Promise<any> {
+    return this.get(`/time-blocks/${timeBlockId}/detailed`);
+  }
+
+  // Get Time Block Student Goal Assignments
+  async getTimeBlockStudentGoals(timeBlockId: number): Promise<Array<{
+    student_id: number;
+    student_name: string;
+    goals: number[];
+    objectives: number[];
+  }>> {
+    return this.get(`/time-blocks/${timeBlockId}/student-goals`);
+  }
+
+  // Update Time Block Series
+  async updateTimeBlockSeries(seriesId: string, updateData: any): Promise<any> {
+    return this.put(`/time-blocks/series/${seriesId}`, updateData);
+  }
+
+  // Update Time Block Series Pattern
+  async updateTimeBlockSeriesPattern(seriesId: string, patternData: any): Promise<any> {
+    return this.put(`/time-blocks/series/${seriesId}/pattern`, patternData);
+  }
+
+  // Get Time Block Appointments
+  async getTimeBlockAppointments(timeBlockId: number): Promise<any[]> {
+    return this.get(`/time-blocks/${timeBlockId}/appointments`);
+  }
+
+  // Update Activity Series
+  async updateActivitySeries(seriesId: string, activities: TimeBlockActivity[]): Promise<any> {
+    return this.put(`/activities/series/${seriesId}`, activities);
   }
 }
 

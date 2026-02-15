@@ -37,6 +37,7 @@ import {
   People,
   PlayArrow
 } from '@mui/icons-material';
+import { Calendar } from 'lucide-react';
 import { DatePicker } from '@mui/x-date-pickers/DatePicker';
 import { LocalizationProvider } from '@mui/x-date-pickers/LocalizationProvider';
 import { AdapterDateFns } from '@mui/x-date-pickers/AdapterDateFns';
@@ -403,7 +404,36 @@ export default function Schedule() {
     try {
       appointmentProgress.showProgress('Creating time block and scheduling appointments...');
       
-      // Call the comprehensive time block creation API
+      // Check if this is a recurring time block
+      if (timeBlockData.recurring_config?.isRecurring) {
+        console.log('Creating recurring time blocks...');
+        const result = await schedulingApi.createRecurringTimeBlocks(timeBlockData);
+        
+        console.log('Recurring time blocks created:', result);
+        
+        // Show success message for recurring
+        let successMessage = `Recurring time block "${timeBlockData.title}" created successfully!`;
+        successMessage += ` Created ${result.total_time_blocks} time block${result.total_time_blocks !== 1 ? 's' : ''}`;
+        successMessage += ` and ${result.total_appointments} appointment${result.total_appointments !== 1 ? 's' : ''}.`;
+        
+        if (result.total_conflicts > 0) {
+          successMessage += ` ${result.total_conflicts} conflict${result.total_conflicts !== 1 ? 's' : ''} were detected.`;
+        }
+        
+        appointmentProgress.showSuccess(successMessage, {
+          totalAppointments: result.total_appointments,
+          createdAppointments: result.total_appointments,
+          conflicts: result.conflicts || []
+        });
+        
+        // Refresh data
+        await refetchAppointments();
+        await refetchTimeBlocks();
+        
+        return;
+      }
+      
+      // Call the single time block creation API
       const result = await schedulingApi.createTimeBlockWithScheduling(timeBlockData);
       
       console.log('Time block created:', result);
@@ -603,24 +633,14 @@ export default function Schedule() {
                 sx={{ 
                   display: 'flex', 
                   alignItems: 'center',
-                  color: '#40A8B6',
-                  fontWeight: 600,
-                  mb: isMobile ? 0.5 : 1,
-                  fontSize: isMobile ? '1.5rem' : undefined
+                  color: '#41AAB7',
+                  fontWeight: 700,
+                  fontSize: isMobile ? '1.5rem' : undefined,
+                  gap: 2
                 }}
               >
-                <CalendarToday sx={{ 
-                  mr: isMobile ? 1 : 2, 
-                  fontSize: isMobile ? 24 : 32 
-                }} />
-                {isMobile ? "Schedule" : "Therapy Schedule"}
-              </Typography>
-              <Typography 
-                variant={isMobile ? "body1" : "h6"} 
-                color="text.secondary"
-                sx={{ fontSize: isMobile ? '0.9rem' : undefined }}
-              >
-                {isMobile ? "Manage appointments" : "Manage appointments and therapy sessions"}
+                <Calendar size={isMobile ? 24 : 32} />
+                Schedule
               </Typography>
             </Box>
             <Button
@@ -816,10 +836,124 @@ export default function Schedule() {
             throw error; // Re-throw so the modal can show the error
           }
         }}
+        onSeriesUpdate={async () => {
+          console.log('🔄 Refreshing data after series update');
+          await refetchAppointments();
+        }}
         onUpdateTimeBlock={async (timeBlockData: any) => {
           console.log('🔄 Updating time block:', timeBlockData);
-          // TODO: Implement time block update API call
-          await refetchTimeBlocks();
+          
+          try {
+            const { schedulingApi } = await import('../../lib/api/scheduling');
+            
+            // Check if this is a series update
+            if (timeBlockData.updateType && timeBlockData.updateType !== 'single') {
+              // Get the series_id from one of the appointments
+              const appointments = await schedulingApi.getTimeBlockAppointments(timeBlockData.id);
+              const seriesAppointment = appointments.find((apt: any) => apt.series_id);
+              
+              if (!seriesAppointment?.series_id) {
+                throw new Error('No series ID found for time block');
+              }
+              
+              if (timeBlockData.updateType === 'pattern') {
+                // Calculate proper offset and target day (same logic as EditAppointmentModal)
+                const originalDate = new Date(seriesAppointment.start_datetime);
+                const newDate = new Date(timeBlockData.start_datetime);
+                
+                const originalDateOnly = new Date(originalDate.getFullYear(), originalDate.getMonth(), originalDate.getDate());
+                const newDateOnly = new Date(newDate.getFullYear(), newDate.getMonth(), newDate.getDate());
+                
+                const offsetDays = Math.floor((newDateOnly.getTime() - originalDateOnly.getTime()) / (1000 * 60 * 60 * 24));
+                const targetDayOfWeek = newDate.getDay(); // Sunday=0 system
+                
+                // Convert the update type to snake_case (backend expects snake_case)
+                let updateType = 'day_alignment';
+                if (timeBlockData.seriesPatternUpdate?.type === 'offset') {
+                  updateType = 'offset_only';
+                } else if (timeBlockData.seriesPatternUpdate?.type === 'dayAlignment') {
+                  updateType = 'day_alignment';
+                }
+                
+                // Use existing appointment pattern update endpoint (same as EditAppointmentModal)
+                const patternData = {
+                  update_type: updateType,
+                  start_datetime: timeBlockData.start_datetime,
+                  end_datetime: timeBlockData.end_datetime,
+                  date_offset_days: offsetDays,
+                  target_day_of_week: targetDayOfWeek,
+                  notes: timeBlockData.notes
+                };
+                
+                console.log('🔄 Calculated offset:', offsetDays, 'Target day:', targetDayOfWeek);
+                console.log('🔄 Original date:', originalDate, 'New date:', newDate);
+                console.log('🔄 Updating time block series pattern using appointment API:', patternData);
+                await schedulingApi.updateAppointmentSeriesPattern(seriesAppointment.series_id, patternData);
+                
+                // Update activities for the series if provided
+                if (timeBlockData.activities && timeBlockData.activities.length > 0) {
+                  console.log('🔄 Updating activities for time block series...');
+                  await schedulingApi.updateActivitySeries(seriesAppointment.series_id, timeBlockData.activities);
+                }
+              } else {
+                // Use existing appointment series update endpoint (same as EditAppointmentModal)
+                const seriesUpdateData = {
+                  start_datetime: timeBlockData.start_datetime,
+                  end_datetime: timeBlockData.end_datetime,
+                  notes: timeBlockData.notes
+                };
+                
+                console.log('🔄 Updating time block series using appointment API:', seriesUpdateData);
+                await schedulingApi.updateAppointmentSeries(seriesAppointment.series_id, seriesUpdateData);
+                
+                // Update activities for the series if provided
+                if (timeBlockData.activities && timeBlockData.activities.length > 0) {
+                  console.log('🔄 Updating activities for time block series...');
+                  await schedulingApi.updateActivitySeries(seriesAppointment.series_id, timeBlockData.activities);
+                }
+              }
+            } else {
+              // Single time block update
+              const updateData = {
+                title: timeBlockData.title,
+                start_datetime: timeBlockData.start_datetime,
+                end_datetime: timeBlockData.end_datetime,
+                location: timeBlockData.location,
+                notes: timeBlockData.notes,
+                teacher_id: timeBlockData.teacher_id,
+                am_pm_indicator: timeBlockData.am_pm_indicator
+              };
+              
+              console.log('🔄 Updating single time block:', updateData);
+              await schedulingApi.updateTimeBlock(timeBlockData.id, updateData);
+              
+              // Update activities for single time block if provided
+              if (timeBlockData.activities && timeBlockData.activities.length > 0) {
+                console.log('🔄 Updating activities for single time block...');
+                
+                // For single time block, update activities individually
+                for (const activity of timeBlockData.activities) {
+                  if (activity.id) {
+                    // Update existing activity
+                    await schedulingApi.updateTimeBlockActivity(timeBlockData.id, activity.id, activity);
+                  } else {
+                    // Create new activity
+                    await schedulingApi.createTimeBlockActivity(timeBlockData.id, {
+                      ...activity,
+                      time_block_id: timeBlockData.id
+                    });
+                  }
+                }
+              }
+            }
+            
+            console.log('✅ Time block updated successfully');
+            await refetchTimeBlocks();
+            await refetchAppointments(); // Also refresh appointments since they may have changed
+          } catch (error) {
+            console.error('❌ Failed to update time block:', error);
+            throw error; // Re-throw so the modal can show the error
+          }
         }}
         onLoadTherapySession={async (appointmentId: number) => {
           console.log('📋 Loading therapy session for appointment:', appointmentId);

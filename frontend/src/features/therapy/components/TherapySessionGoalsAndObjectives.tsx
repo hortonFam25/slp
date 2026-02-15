@@ -125,7 +125,7 @@ const getSchoolYearRange = () => {
   return { start: schoolYearStart, end: schoolYearEnd };
 };
 
-interface GridProgressViewProps {
+export interface GridProgressViewProps {
   studentId: number;
   availableGoals: IEPGoal[];
   session: TherapySession;
@@ -133,13 +133,15 @@ interface GridProgressViewProps {
   onUpdateObjectiveProgress?: (objectiveId: number, updates: any) => void;
 }
 
-function GridProgressView({ 
+export function GridProgressView({ 
   studentId, 
   availableGoals, 
   session, 
   disabled, 
   onUpdateObjectiveProgress 
 }: GridProgressViewProps) {
+  const theme = useTheme();
+  const isMobile = useMediaQuery(theme.breakpoints.down('sm'));
   // Constants for tracking options
   const GRID_PROGRESS_RATINGS = ['no_progress', 'minimal', 'moderate', 'good', 'excellent'];
   const GRID_INDEPENDENCE_LEVELS = ['independent', 'minimal_prompts', 'moderate_prompts', 'maximum_prompts', 'hand_over_hand'];
@@ -165,11 +167,64 @@ function GridProgressView({
         setLoading(true);
         const { start, end } = getSchoolYearRange();
         
+        // Get ALL sessions for the school year (use max limit of 50)
         const response = await fetch(
-          `${import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'}/api/therapy-sessions/student/${studentId}/school-year?start_date=${start.toISOString().split('T')[0]}&end_date=${end.toISOString().split('T')[0]}&limit=12`
+          `${import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'}/api/therapy-sessions/student/${studentId}/school-year?start_date=${start.toISOString().split('T')[0]}&end_date=${end.toISOString().split('T')[0]}&limit=50`
         );
-        const data = await response.json();
-        setSessions(data.slice(0, 12)); // Ensure max 12 sessions
+        const allSessions = await response.json();
+        
+        // Sort sessions by date (oldest to newest)
+        const sortedSessions = allSessions.sort((a: any, b: any) => 
+          new Date(a.session_date).getTime() - new Date(b.session_date).getTime()
+        );
+        
+        console.log('All sessions:', sortedSessions.map(s => ({ date: s.session_date, id: s.id })));
+        
+        // Smart grid logic: center around today's session
+        const today = new Date();
+        const todayStr = today.toISOString().split('T')[0];
+        
+        console.log('Looking for today:', todayStr);
+        
+        // Find today's session index (compare date part only, ignore time)
+        const todayIndex = sortedSessions.findIndex((session: any) => 
+          session.session_date.split('T')[0] === todayStr
+        );
+        
+        console.log('Today index:', todayIndex);
+        
+        let displaySessions;
+        
+        if (todayIndex === -1) {
+          // No session today, show the 12 most recent sessions
+          displaySessions = sortedSessions.slice(-12);
+        } else {
+          // Center around today's session (position 8 out of 12)
+          // We want: 7 sessions before today + today + 4 sessions after today
+          const sessionsBefore = 7;
+          const sessionsAfter = 4;
+          
+          const startIndex = Math.max(0, todayIndex - sessionsBefore);
+          const endIndex = Math.min(sortedSessions.length, startIndex + 12); // Always try to get 12 sessions
+          
+          // If we can't get 12 sessions from the calculated start, adjust
+          if (endIndex - startIndex < 12) {
+            if (startIndex === 0) {
+              // Near beginning, take first 12
+              displaySessions = sortedSessions.slice(0, Math.min(12, sortedSessions.length));
+            } else {
+              // Near end, take last 12
+              displaySessions = sortedSessions.slice(-12);
+            }
+          } else {
+            displaySessions = sortedSessions.slice(startIndex, endIndex);
+          }
+        }
+        
+        console.log('Display sessions:', displaySessions.map(s => ({ date: s.session_date, id: s.id })));
+        console.log('Today position in display:', displaySessions.findIndex(s => s.session_date === todayStr));
+        
+        setSessions(displaySessions);
       } catch (error) {
         console.error('Failed to fetch school year sessions:', error);
         setSessions([]);
@@ -322,11 +377,13 @@ function GridProgressView({
     <TableContainer 
       component={Paper} 
       sx={{ 
-        overflowX: 'auto',
+        overflow: 'auto',
         border: 1,
         borderColor: 'grey.300',
         borderRadius: 2,
-        maxWidth: '100vw'
+        maxWidth: '100vw',
+        height: isMobile ? 'calc(100vh - 200px)' : 'calc(100vh - 250px)',
+        mb: 2
       }}
     >
       <Table stickyHeader size="small">
@@ -338,14 +395,15 @@ function GridProgressView({
                 backgroundColor: '#41AAB7',
                 color: 'white',
                 fontWeight: 600,
-                minWidth: 300,
+                minWidth: isMobile ? 200 : 300,
                 position: 'sticky',
                 left: 0,
                 zIndex: 10,
-                boxShadow: '2px 0 4px rgba(0,0,0,0.1)'
+                boxShadow: '2px 0 4px rgba(0,0,0,0.1)',
+                fontSize: isMobile ? '0.875rem' : '1rem'
               }}
             >
-              Goals & Objectives
+              {isMobile ? 'Goals & Obj.' : 'Goals & Objectives'}
             </TableCell>
             {sessions.map((sess) => {
               const isCurrentSession = sess.id === session.id;
@@ -357,11 +415,16 @@ function GridProgressView({
                     backgroundColor: isCurrentSession ? '#2D7A85' : '#41AAB7',
                     color: 'white',
                     fontWeight: 600,
-                    minWidth: 120,
-                    fontSize: '0.9rem'
+                    minWidth: isMobile ? 90 : 120,
+                    maxWidth: isMobile ? 100 : 120,
+                    fontSize: isMobile ? '0.75rem' : '0.9rem',
+                    px: isMobile ? 0.5 : 1
                   }}
                 >
-                  {format(new Date(sess.session_date), 'M/d/yy')}
+                  {isMobile 
+                    ? format(new Date(sess.session_date), 'M/d')
+                    : format(new Date(sess.session_date), 'M/d/yy')
+                  }
                 </TableCell>
               );
             })}
@@ -443,13 +506,14 @@ function GridProgressView({
                       left: 0,
                       backgroundColor: 'inherit',
                       zIndex: 5,
-                      maxWidth: 300,
+                      maxWidth: isMobile ? 200 : 300,
                       wordWrap: 'break-word',
                       whiteSpace: 'normal',
-                      boxShadow: '1px 0 2px rgba(0,0,0,0.05)'
+                      boxShadow: '1px 0 2px rgba(0,0,0,0.05)',
+                      fontSize: isMobile ? '0.75rem' : '0.875rem'
                     }}
                   >
-                    <Box sx={{ pl: 3 }}>
+                    <Box sx={{ pl: isMobile ? 1.5 : 3 }}>
                       <Typography 
                         variant="body2" 
                         sx={{ 
@@ -457,7 +521,8 @@ function GridProgressView({
                           mb: 0.5,
                           wordWrap: 'break-word',
                           whiteSpace: 'normal',
-                          color: '#4A5D6B' // Darker grey for objective titles
+                          color: '#4A5D6B', // Darker grey for objective titles
+                          fontSize: isMobile ? '0.75rem' : '0.875rem'
                         }}
                       >
                         📋 Objective {objective.objective_number}
@@ -469,7 +534,8 @@ function GridProgressView({
                           whiteSpace: 'normal',
                           lineHeight: 1.3,
                           display: 'block',
-                          color: '#6B7D8A' // Medium grey for objective descriptions
+                          color: '#6B7D8A', // Medium grey for objective descriptions
+                          fontSize: isMobile ? '0.7rem' : '0.75rem'
                         }}
                       >
                         {objective.objective_description}
@@ -491,12 +557,13 @@ function GridProgressView({
                       <TableCell
                         key={sess.id}
                         sx={{
-                          p: 1,
+                          p: 0,
                           cursor: disabled ? 'default' : 'pointer',
                           position: 'relative',
                           verticalAlign: 'top',
-                          minHeight: 100,
-                          maxWidth: 120,
+                          minHeight: isMobile ? 120 : 100,
+                          maxWidth: isMobile ? 100 : 120,
+                          minWidth: isMobile ? 90 : 120,
                           borderRight: 1,
                           borderColor: '#E0E7E9',
                           ...(isCurrentSession && {
@@ -507,11 +574,13 @@ function GridProgressView({
                       >
                         <Box
                           sx={{
-                            minHeight: 80,
+                            minHeight: isMobile ? 100 : 80,
+                            height: 'calc(100% - 8px)',
                             display: 'flex',
                             alignItems: notes ? 'flex-start' : 'center',
                             justifyContent: notes ? 'flex-start' : 'center',
                             p: 1,
+                            m: isMobile ? '2px' : '4px',
                             borderRadius: 1,
                             backgroundColor: notes ? '#E8F5E8' : 'transparent', // Light green for notes
                             border: notes ? 1 : 0,
@@ -556,13 +625,15 @@ function GridProgressView({
                                 variant="caption"
                                 sx={{
                                   display: '-webkit-box',
-                                  WebkitLineClamp: 3,
+                                  WebkitLineClamp: 10,
                                   WebkitBoxOrient: 'vertical',
                                   overflow: 'hidden',
-                                  fontSize: '0.75rem',
-                                  lineHeight: 1.3,
+                                  fontSize: isMobile ? '0.7rem' : '0.75rem',
+                                  lineHeight: 1.2,
                                   wordBreak: 'break-word',
-                                  cursor: 'pointer'
+                                  cursor: 'pointer',
+                                  height: '100%',
+                                  width: '100%'
                                 }}
                               >
                                 {notes}
@@ -574,12 +645,13 @@ function GridProgressView({
                                 variant="caption" 
                                 color="text.secondary"
                                 sx={{ 
-                                  fontSize: '0.7rem',
+                                  fontSize: isMobile ? '0.65rem' : '0.7rem',
+                                  fontWeight: isMobile ? 600 : 'normal',
                                   fontStyle: 'italic',
                                   textAlign: 'center'
                                 }}
                               >
-                                + Add notes
+                                {isMobile ? '+ Add' : '+ Add notes'}
                               </Typography>
                             )
                           )}
@@ -835,6 +907,13 @@ export function TherapySessionGoalsAndObjectives({
   const [objectiveData, setObjectiveData] = useState<Record<number, ObjectiveSessionData>>({});
   const [viewMode, setViewMode] = useState<'detailed' | 'grid'>('grid');
   
+  // Initialize with detailed view on mobile for better usability
+  useEffect(() => {
+    if (isMobile && viewMode === 'grid') {
+      setViewMode('detailed');
+    }
+  }, [isMobile]);
+  
   // Historical sidebar state
   const [historicalSidebarOpen, setHistoricalSidebarOpen] = useState(false);
   const [selectedHistoricalData, setSelectedHistoricalData] = useState<HistoricalData | null>(null);
@@ -1083,7 +1162,26 @@ export function TherapySessionGoalsAndObjectives({
               size="small"
               sx={{ fontSize: isMobile ? '0.7rem' : undefined }}
             />
-            {!isMobile && (
+            {isMobile ? (
+              <>
+                <ToggleButtonGroup
+                  value={viewMode}
+                  exclusive
+                  onChange={(_, newViewMode) => newViewMode && setViewMode(newViewMode)}
+                  size="small"
+                  sx={{ width: '100%', justifyContent: 'center' }}
+                >
+                  <ToggleButton value="detailed" aria-label="list view" sx={{ flex: 1 }}>
+                    <ViewList fontSize="small" sx={{ mr: 0.5 }} />
+                    <Typography variant="caption">List</Typography>
+                  </ToggleButton>
+                  <ToggleButton value="grid" aria-label="grid view" sx={{ flex: 1 }}>
+                    <GridView fontSize="small" sx={{ mr: 0.5 }} />
+                    <Typography variant="caption">Grid</Typography>
+                  </ToggleButton>
+                </ToggleButtonGroup>
+              </>
+            ) : (
               <>
                 <ToggleButtonGroup
                   value={viewMode}

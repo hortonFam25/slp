@@ -41,6 +41,7 @@ import {
   Refresh,
   FilterList
 } from '@mui/icons-material';
+import { GraduationCap } from 'lucide-react';
 import { useSchools } from '../../lib/hooks/useSchools';
 import { SchoolForm } from './components/SchoolForm';
 import { SchoolCard } from './components/SchoolCard';
@@ -140,18 +141,15 @@ export default function Schools() {
           variant="h4" 
           component="h1" 
           sx={{ 
-            mb: 2, 
             display: 'flex', 
             alignItems: 'center',
-            color: '#40A8B6',
-            fontWeight: 600
+            color: '#41AAB7',
+            fontWeight: 700,
+            gap: 2
           }}
         >
-          <SchoolIcon sx={{ mr: 2, fontSize: 32 }} />
-          School Management
-        </Typography>
-        <Typography variant="h6" color="text.secondary">
-          Manage schools, contacts, and district information
+          <GraduationCap size={32} />
+          Schools
         </Typography>
       </Box>
 

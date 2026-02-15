@@ -27,6 +27,8 @@ import { Save, Edit, Cancel, Archive, Unarchive, Add, Delete } from '@mui/icons-
 import { Student, studentsApi, UpdateStudentRequest, StudentEligibility, EligibilityCategory } from '../../lib/api/students';
 import { teachersApi, TeacherSummary } from '../../lib/api/teachers';
 import { eligibilitiesApi, CreateStudentEligibilityRequest } from '../../lib/api/eligibilities';
+import { schoolsApi } from '../../lib/api/schools';
+import type { SchoolSummary } from '../../lib/api/types/schools';
 
 interface StudentBasicInfoProps {
   student: Student | null;
@@ -43,6 +45,8 @@ export function StudentBasicInfo({ student, loading, onUpdate }: StudentBasicInf
   const [formData, setFormData] = useState<UpdateStudentRequest>({});
   const [teachers, setTeachers] = useState<TeacherSummary[]>([]);
   const [teachersLoading, setTeachersLoading] = useState(false);
+  const [schools, setSchools] = useState<SchoolSummary[]>([]);
+  const [schoolsLoading, setSchoolsLoading] = useState(false);
   
   // Eligibility management state
   const [eligibilityCategories, setEligibilityCategories] = useState<EligibilityCategory[]>([]);
@@ -63,8 +67,6 @@ export function StudentBasicInfo({ student, loading, onUpdate }: StudentBasicInf
         last: student.last,
         uic: student.uic || '',
         grade_level: student.grade_level || '',
-        teacher_name: student.teacher_name || '',
-        case_manager: student.case_manager || '',
         enrollment_status: student.enrollment_status,
         date_of_birth: student.date_of_birth || '',
         // IEP and Evaluation dates
@@ -76,6 +78,9 @@ export function StudentBasicInfo({ student, loading, onUpdate }: StudentBasicInf
         eligibility_determination_date: student.eligibility_determination_date || '',
         school_id: student.school_id,
         is_archived: student.is_archived,
+        // Teacher and case manager relationships
+        teacher_id: student.teacher_id,
+        case_manager_id: student.case_manager_id,
       });
     }
   }, [student]);
@@ -93,6 +98,19 @@ export function StudentBasicInfo({ student, loading, onUpdate }: StudentBasicInf
     }
   };
 
+  const loadSchools = async () => {
+    try {
+      setSchoolsLoading(true);
+      const schoolData = await schoolsApi.getSchoolsSummary(true); // Get active schools only
+      setSchools(schoolData);
+    } catch (err) {
+      console.error('Failed to load schools:', err);
+      setError('Failed to load schools list');
+    } finally {
+      setSchoolsLoading(false);
+    }
+  };
+
   const loadEligibilityCategories = async () => {
     try {
       const categories = await eligibilitiesApi.getEligibilityCategories(true);
@@ -107,6 +125,7 @@ export function StudentBasicInfo({ student, loading, onUpdate }: StudentBasicInf
     setIsEditing(true);
     setError(null);
     await loadTeachers();
+    await loadSchools();
     await loadEligibilityCategories();
   };
 
@@ -120,8 +139,6 @@ export function StudentBasicInfo({ student, loading, onUpdate }: StudentBasicInf
         last: student.last,
         uic: student.uic || '',
         grade_level: student.grade_level || '',
-        teacher_name: student.teacher_name || '',
-        case_manager: student.case_manager || '',
         enrollment_status: student.enrollment_status,
         date_of_birth: student.date_of_birth || '',
         // IEP and Evaluation dates
@@ -133,6 +150,9 @@ export function StudentBasicInfo({ student, loading, onUpdate }: StudentBasicInf
         eligibility_determination_date: student.eligibility_determination_date || '',
         school_id: student.school_id,
         is_archived: student.is_archived,
+        // Teacher and case manager relationships
+        teacher_id: student.teacher_id,
+        case_manager_id: student.case_manager_id,
       });
     }
   };
@@ -502,15 +522,15 @@ export function StudentBasicInfo({ student, loading, onUpdate }: StudentBasicInf
                 <FormControl fullWidth disabled={saving || teachersLoading}>
                   <InputLabel>Teacher</InputLabel>
                   <Select
-                    value={formData.teacher_name || ''}
-                    onChange={(e) => updateFormField('teacher_name', e.target.value)}
+                    value={formData.teacher_id || ''}
+                    onChange={(e) => updateFormField('teacher_id', e.target.value)}
                     label="Teacher"
                   >
                     <MenuItem value="">
                       <em>-- Select Teacher --</em>
                     </MenuItem>
                     {teachers.map((teacher) => (
-                      <MenuItem key={teacher.id} value={teacher.display_name}>
+                      <MenuItem key={teacher.id} value={teacher.id}>
                         {teacher.display_name}
                         {teacher.title ? ` (${teacher.title})` : ''}
                       </MenuItem>
@@ -526,7 +546,7 @@ export function StudentBasicInfo({ student, loading, onUpdate }: StudentBasicInf
                     Teacher
                   </Typography>
                   <Typography variant="body1">
-                    {student.teacher_name || 'Not assigned'}
+                    {student.teacher?.display_name || 'Not assigned'}
                   </Typography>
                 </Box>
               )}
@@ -534,20 +554,69 @@ export function StudentBasicInfo({ student, loading, onUpdate }: StudentBasicInf
 
             <Grid item xs={12} sm={6}>
               {isEditing ? (
-                <TextField
-                  fullWidth
-                  label="Case Manager"
-                  value={formData.case_manager || ''}
-                  onChange={(e) => updateFormField('case_manager', e.target.value)}
-                  disabled={saving}
-                />
+                <FormControl fullWidth disabled={saving || teachersLoading}>
+                  <InputLabel>Case Manager</InputLabel>
+                  <Select
+                    value={formData.case_manager_id || ''}
+                    onChange={(e) => updateFormField('case_manager_id', e.target.value)}
+                    label="Case Manager"
+                  >
+                    <MenuItem value="">
+                      <em>-- Select Case Manager --</em>
+                    </MenuItem>
+                    {teachers.map((teacher) => (
+                      <MenuItem key={teacher.id} value={teacher.id}>
+                        {teacher.display_name}
+                        {teacher.title ? ` (${teacher.title})` : ''}
+                      </MenuItem>
+                    ))}
+                  </Select>
+                  <FormHelperText>
+                    {teachersLoading ? 'Loading teachers & case managers...' : 'Select a case manager from the list'}
+                  </FormHelperText>
+                </FormControl>
               ) : (
                 <Box>
                   <Typography variant="body2" color="text.secondary" gutterBottom>
                     Case Manager
                   </Typography>
                   <Typography variant="body1">
-                    {student.case_manager || 'Not provided'}
+                    {student.case_manager?.display_name || 'Not assigned'}
+                  </Typography>
+                </Box>
+              )}
+            </Grid>
+
+            <Grid item xs={12} sm={6}>
+              {isEditing ? (
+                <FormControl fullWidth disabled={saving || schoolsLoading}>
+                  <InputLabel>School</InputLabel>
+                  <Select
+                    value={formData.school_id || ''}
+                    onChange={(e) => updateFormField('school_id', e.target.value)}
+                    label="School"
+                  >
+                    <MenuItem value="">
+                      <em>-- Select School --</em>
+                    </MenuItem>
+                    {schools.map((school) => (
+                      <MenuItem key={school.id} value={school.id}>
+                        {school.name}
+                        {school.district ? ` (${school.district})` : ''}
+                      </MenuItem>
+                    ))}
+                  </Select>
+                  <FormHelperText>
+                    {schoolsLoading ? 'Loading schools...' : 'Select a school from the list'}
+                  </FormHelperText>
+                </FormControl>
+              ) : (
+                <Box>
+                  <Typography variant="body2" color="text.secondary" gutterBottom>
+                    School
+                  </Typography>
+                  <Typography variant="body1">
+                    {student.school?.name || 'Not assigned'}
                   </Typography>
                 </Box>
               )}

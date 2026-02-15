@@ -183,29 +183,26 @@ export function AppointmentPreSessionPlanner({
       objectivesWithNotes.length > 0 &&
       selectedAppointment?.id === loadedAppointmentRef.current
     ) {
-      // Check if we already have notes loaded
-      const hasNotesLoaded = objectivesWithNotes.some(obj => obj.pre_session_notes.length > 0);
-      
-      if (!hasNotesLoaded) {
-        setObjectivesWithNotes(prev => 
-          prev.map(obj => {
-            const existingObjective = existingSessionData.objectives?.find(
-              (sessionObj: any) => sessionObj.objective_id === obj.objective_id
-            );
-            
-            if (existingObjective?.pre_session_notes) {
-              return {
-                ...obj,
-                pre_session_notes: existingObjective.pre_session_notes,
-                planned: true
-              };
-            }
-            return obj;
-          })
-        );
-      }
+      // Always load session data when it becomes available - don't check for existing notes
+      // since we reset objectives when switching appointments
+      setObjectivesWithNotes(prev => 
+        prev.map(obj => {
+          const existingObjective = existingSessionData.objectives?.find(
+            (sessionObj: any) => sessionObj.objective_id === obj.objective_id
+          );
+          
+          if (existingObjective?.pre_session_notes) {
+            return {
+              ...obj,
+              pre_session_notes: existingObjective.pre_session_notes,
+              planned: true
+            };
+          }
+          return obj;
+        })
+      );
     }
-  }, [sessionLoading, selectedAppointment?.id]);
+  }, [sessionLoading, existingSessionData, selectedAppointment?.id, objectivesWithNotes.length]);
 
   const updateObjectiveNotes = (objectiveId: number, notes: string) => {
     setObjectivesWithNotes(prev => 
@@ -280,11 +277,19 @@ export function AppointmentPreSessionPlanner({
   const allObjectivesWithColors = useMemo(() => {
     const allObjectives: (ObjectiveWithNotes & { 
       goal_description: string; 
+      goal_number?: string;
       color: { bg: string; border: string; text: string };
       objectiveIndex: number;
     })[] = [];
     
-    studentGoals.forEach((goal, goalIndex) => {
+    // Sort goals by goal_number in ascending order
+    const sortedGoals = [...studentGoals].sort((a, b) => {
+      const goalNumA = a.goal_number ? parseInt(a.goal_number) : 0;
+      const goalNumB = b.goal_number ? parseInt(b.goal_number) : 0;
+      return goalNumA - goalNumB;
+    });
+    
+    sortedGoals.forEach((goal, goalIndex) => {
       const goalColor = objectiveColors[goalIndex % objectiveColors.length];
       
       if (goal.objectives) {
@@ -296,6 +301,7 @@ export function AppointmentPreSessionPlanner({
             allObjectives.push({
               ...objectiveData,
               goal_description: goal.goal_description,
+              goal_number: goal.goal_number,
               color: goalColor, // Same color for all objectives in this goal
               objectiveIndex: objIndex + 1
             });
@@ -443,7 +449,7 @@ export function AppointmentPreSessionPlanner({
           )}
 
           {!goalsLoading && !sessionLoading && allObjectivesWithColors.length > 0 && (
-            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2, pr: 1 }}>
+            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2, pr: 1, pt: 1 }}>
               {allObjectivesWithColors.map((objective) => (
                 <Paper 
                   key={objective.objective_id} 
@@ -461,34 +467,35 @@ export function AppointmentPreSessionPlanner({
                     }
                   }}
                 >
-                  {/* Header Row */}
-                  <Box sx={{ display: 'flex', alignItems: 'flex-start', gap: 1.5, mb: 2 }}>
-                    <Typography 
-                      variant="caption" 
-                      sx={{ 
-                        bgcolor: objective.color.border,
-                        color: 'white',
-                        px: 1.5,
-                        py: 0.5,
-                        borderRadius: 1,
-                        fontWeight: 600,
-                        fontSize: '0.75rem',
-                        minWidth: 'auto',
-                        flexShrink: 0
-                      }}
-                    >
-                      #{objective.objectiveIndex}
+                  {/* Goal Row */}
+                  <Box sx={{ 
+                    mb: 1.5,
+                    overflow: 'hidden'
+                  }}>
+                    <Typography variant="body2" sx={{ 
+                      color: objective.color.text,
+                      fontWeight: 400,
+                      fontSize: '0.95rem',
+                      whiteSpace: 'nowrap',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      lineHeight: 1.2
+                    }}>
+                      <span style={{ fontWeight: 700 }}>Goal {objective.goal_number || '?'}</span>: <span style={{ fontStyle: 'italic' }}>{objective.goal_description}</span>
                     </Typography>
-                    
+                  </Box>
+
+                  {/* Header Row */}
+                  <Box sx={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 1.5, mb: 2, ml: 1.5 }}>
                     {/* Objective Description */}
                     <Typography variant="body2" sx={{ 
                       flex: 1,
                       color: objective.color.text,
-                      fontWeight: 500,
+                      fontWeight: 400,
                       lineHeight: 1.4,
                       fontSize: '0.9rem'
                     }}>
-                      {objective.objective_description}
+                      <span style={{ fontWeight: 700 }}>Objective {objective.objectiveIndex}</span>: {objective.objective_description}
                     </Typography>
                     
                     {/* Planned Indicator */}
@@ -507,26 +514,28 @@ export function AppointmentPreSessionPlanner({
                   </Box>
                   
                   {/* Notes Field */}
-                  <TextField
-                    fullWidth
-                    multiline
-                    rows={2}
-                    size="small"
-                    placeholder="Add pre-session notes for this objective..."
-                    value={objective.pre_session_notes}
-                    onChange={(e) => updateObjectiveNotes(objective.objective_id, e.target.value)}
-                    sx={{ 
-                      '& .MuiOutlinedInput-root': {
-                        bgcolor: 'rgba(255, 255, 255, 0.8)',
-                        '&:hover .MuiOutlinedInput-notchedOutline': {
-                          borderColor: objective.color.border,
-                        },
-                        '&.Mui-focused .MuiOutlinedInput-notchedOutline': {
-                          borderColor: objective.color.border,
-                        },
-                      }
-                    }}
-                  />
+                  <Box sx={{ ml: 1.5 }}>
+                    <TextField
+                      fullWidth
+                      multiline
+                      rows={2}
+                      size="small"
+                      placeholder="Add pre-session notes for this objective..."
+                      value={objective.pre_session_notes}
+                      onChange={(e) => updateObjectiveNotes(objective.objective_id, e.target.value)}
+                      sx={{ 
+                        '& .MuiOutlinedInput-root': {
+                          bgcolor: 'rgba(255, 255, 255, 0.8)',
+                          '&:hover .MuiOutlinedInput-notchedOutline': {
+                            borderColor: objective.color.border,
+                          },
+                          '&.Mui-focused .MuiOutlinedInput-notchedOutline': {
+                            borderColor: objective.color.border,
+                          },
+                        }
+                      }}
+                    />
+                  </Box>
                 </Paper>
               ))}
             </Box>

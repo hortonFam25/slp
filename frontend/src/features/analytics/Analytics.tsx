@@ -9,6 +9,7 @@ import { useQuery } from '@tanstack/react-query';
 import { studentsApi } from '../../lib/api/students';
 import { schedulingApi } from '../../lib/api/scheduling';
 import { therapySessionsApi } from '../../lib/api/therapySessions';
+import { BarChart3 } from 'lucide-react';
 
 interface KPICardProps {
   title: string;
@@ -136,13 +137,13 @@ export default function Analytics() {
       <Box sx={{ mb: 4 }}>
         <Typography variant="h4" sx={{ 
           fontWeight: 700, 
-          color: '#333',
-          mb: 1
+          color: '#41AAB7',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 2
         }}>
+          <BarChart3 size={32} />
           Analytics
-        </Typography>
-        <Typography variant="body1" color="text.secondary">
-          Key performance indicators and system overview
         </Typography>
       </Box>
 
