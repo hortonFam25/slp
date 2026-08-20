@@ -27,7 +27,10 @@ if not config.get_main_option("sqlalchemy.url"):
     if not db_url:
         # Fallback for development
         db_url = "sqlite:///./local.db"
-    config.set_main_option("sqlalchemy.url", db_url)
+    # set_main_option runs configparser %-interpolation; odbc_connect-style
+    # URLs are full of %XX escapes, so % must be doubled or alembic dies with
+    # "invalid interpolation syntax".
+    config.set_main_option("sqlalchemy.url", db_url.replace("%", "%%"))
 
 target_metadata = Base.metadata
 
@@ -51,11 +54,30 @@ def run_migrations_online() -> None:
     # Create engine with explicit configuration for SQL Server
     engine_config = config.get_section(config.config_ini_section)
     engine_config["sqlalchemy.poolclass"] = pool.NullPool
-    
-    connectable = engine_from_config(
-        engine_config, 
-        prefix="sqlalchemy."
-    )
+
+    # Entra token auth (no password, no Authentication= keyword): when
+    # SLP_DB_ACCESS_TOKEN holds an access token for https://database.windows.net/,
+    # hand it to the driver as SQL_COPT_SS_ACCESS_TOKEN (1256). This works on
+    # every ODBC Driver 17/18 build, unlike Authentication=ActiveDirectoryAzCli
+    # which needs 18.1+. Used by .github/workflows/migrate.yml and the
+    # provisioning scripts; a plain connection string keeps working unchanged.
+    access_token = os.environ.get("SLP_DB_ACCESS_TOKEN", "").strip()
+    if access_token:
+        import struct
+        from sqlalchemy import create_engine
+
+        token_bytes = access_token.encode("utf-16-le")
+        attrs = {1256: struct.pack("<i", len(token_bytes)) + token_bytes}
+        connectable = create_engine(
+            engine_config["sqlalchemy.url"],
+            poolclass=pool.NullPool,
+            connect_args={"attrs_before": attrs},
+        )
+    else:
+        connectable = engine_from_config(
+            engine_config,
+            prefix="sqlalchemy."
+        )
     
 
     with connectable.connect() as connection:
