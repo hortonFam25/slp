@@ -11,6 +11,7 @@ from app.dependencies.access_control import (
 )
 from app.dependencies.auth import AuthContext, ensure_student_access, get_auth_context
 from app.repositories.therapy_session_repository import TherapySessionRepository
+from app.services import archive as archive_service
 from app.schemas.therapy_session import (
     TherapySessionCreate, TherapySessionUpdate, TherapySessionResponse, 
     TherapySessionSummary, TherapySessionFilters,
@@ -217,6 +218,7 @@ async def get_therapy_sessions(
     skip: int = Query(0, ge=0, description="Number of records to skip"),
     limit: int = Query(100, ge=1, le=1000, description="Number of records to return"),
     order_by: Optional[str] = Query("desc", description="Order direction: 'asc' for oldest first, 'desc' for newest first"),
+    include_archived: bool = Query(False, description="Include archived rows (archived means hidden, never deleted)"),
     repo: TherapySessionRepository = Depends(get_therapy_session_repo),
     auth: AuthContext = Depends(get_auth_context),
 ):
@@ -231,7 +233,9 @@ async def get_therapy_sessions(
         end_date=end_date
     )
     
-    sessions = repo.get_sessions(filters, skip=skip, limit=limit, order_by=order_by)
+    sessions = repo.get_sessions(
+        filters, skip=skip, limit=limit, order_by=order_by, include_archived=include_archived
+    )
     if auth.enforce_access and not auth.is_admin:
         sessions = [s for s in sessions if s.student_id in auth.allowed_student_ids]
     return [_build_session_summary(session, auth) for session in sessions]
@@ -325,16 +329,39 @@ async def get_goal_history(
 @router.delete("/{session_id}")
 async def delete_therapy_session(
     session_id: int,
+    reason: Optional[str] = Query(None, description="Why the session is being archived"),
     repo: TherapySessionRepository = Depends(get_therapy_session_repo),
     auth: AuthContext = Depends(get_auth_context),
 ):
-    """Delete a therapy session"""
+    """Archive one therapy session. NOTHING IS DELETED.
+
+    Same verb, same path, same message. The session is hidden and
+    `POST /api/archive/events/{archiveEventId}/restore` brings it back.
+
+    Its PROGRESS ENTRIES are deliberately left active: they belong to an
+    objective, they are the evidence a service was delivered, and the old delete
+    took them with it only because a foreign-key cascade said so. See
+    `app/services/archive.py`.
+    """
     ensure_therapy_session_access(repo.db, auth, session_id)
-    success = repo.delete_session(session_id)
-    if not success:
+    if repo.get_session_by_id(session_id) is None:
         raise HTTPException(status_code=404, detail="Therapy session not found")
-    
-    return {"message": "Therapy session deleted successfully"}
+    try:
+        event = archive_service.archive(
+            repo.db,
+            user_id=auth.effective_user.id,
+            entity_type=archive_service.ENTITY_THERAPY_SESSION,
+            entity_id=session_id,
+            reason=reason,
+        )
+    except archive_service.AlreadyArchivedError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    return {
+        "message": "Therapy session deleted successfully",
+        "archived": True,
+        "archiveEventId": event.id,
+    }
 
 
 @router.get("/student/{student_id}", response_model=List[TherapySessionSummary])

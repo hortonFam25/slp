@@ -64,9 +64,20 @@ class TimeBlockActivity(Base):
 
     @property
     def assigned_students(self):
-        """List of students assigned to this activity"""
-        return [assignment.student for assignment in self.student_assignments 
-                if assignment.status == 'assigned']
+        """List of students assigned to this activity.
+
+        Archived students are excluded, for the reason given on
+        `TimeBlock.assigned_students`: the assignment join row is never
+        archived, so the child behind it has to be filtered where the roster is
+        read.
+        """
+        return [
+            assignment.student
+            for assignment in self.student_assignments
+            if assignment.status == 'assigned'
+            and assignment.student is not None
+            and assignment.student.archived_at is None
+        ]
 
     def validate_time_within_block(self) -> dict:
         """Validate that activity times are within the time block timeframe"""

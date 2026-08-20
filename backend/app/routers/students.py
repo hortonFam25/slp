@@ -6,6 +6,7 @@ from app.db.database import get_db
 from app.dependencies.auth import AuthContext, ensure_student_access, get_auth_context, grant_student_access
 from app.repositories.student_repository import StudentRepository
 from app.schemas.student import StudentCreate, StudentRead, StudentUpdate, StudentSummary
+from app.services import archive as archive_service
 
 
 router = APIRouter(prefix="/api/students", tags=["students"])
@@ -134,7 +135,17 @@ def update_student(
     
     ensure_student_access(auth, student_id, action="update student")
     allowed_student_ids = auth.allowed_student_ids if auth.enforce_access and not auth.is_admin else None
-    student = repo.update_student(student_id, payload, allowed_student_ids=allowed_student_ids)
+    try:
+        student = repo.update_student(
+            student_id,
+            payload,
+            allowed_student_ids=allowed_student_ids,
+            # `is_archived` in the body archives or restores through the
+            # archive service, and the event is recorded against this user.
+            user_id=auth.effective_user.id,
+        )
+    except archive_service.ArchiveError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if not student:
         raise HTTPException(status_code=404, detail="Student not found")
     if _should_mask_student_names(auth):
@@ -145,17 +156,42 @@ def update_student(
 @router.delete("/{student_id}")
 def delete_student(
     student_id: int,
+    reason: Optional[str] = Query(None, description="Why the student is being archived"),
     db: Session = Depends(get_db),
     auth: AuthContext = Depends(get_auth_context),
 ):
-    """Delete a student (permanent removal)"""
+    """Archive a student and everything under them. NOTHING IS DELETED.
+
+    Same verb, same path, same 404 and the same success message the React app
+    already reads -- because this route used to destroy the record and the app
+    was written against that. What changed is underneath: the student, their
+    goals, objectives, progress entries, therapy sessions and appointments are
+    stamped with one archive event and hidden, and
+    `POST /api/archive/events/{archiveEventId}/restore` puts every one of them
+    back.
+
+    The response carries `archived` and `archiveEventId` so a caller that wants
+    to offer an undo has the id to offer it with.
+    """
     repo = StudentRepository(db)
-    ensure_student_access(auth, student_id, action="delete student")
+    ensure_student_access(auth, student_id, action="archive student")
     allowed_student_ids = auth.allowed_student_ids if auth.enforce_access and not auth.is_admin else None
-    success = repo.delete_student(student_id, allowed_student_ids=allowed_student_ids)
-    if not success:
+    try:
+        student = repo.archive_student(
+            student_id,
+            user_id=auth.effective_user.id,
+            reason=reason,
+            allowed_student_ids=allowed_student_ids,
+        )
+    except archive_service.AlreadyArchivedError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if not student:
         raise HTTPException(status_code=404, detail="Student not found")
-    return {"message": "Student deleted successfully"}
+    return {
+        "message": "Student deleted successfully",
+        "archived": True,
+        "archiveEventId": student.archive_event_id,
+    }
 
 
 @router.put("/{student_id}/archive", response_model=StudentRead)
@@ -164,12 +200,26 @@ def archive_student(
     db: Session = Depends(get_db),
     auth: AuthContext = Depends(get_auth_context),
 ):
-    """Archive a student (hide from active lists but preserve data)"""
+    """Archive a student (hide from active lists but preserve data).
+
+    Unchanged in shape -- still PUT, still returns the student -- but it now goes
+    through `app.services.archive`, so the archive is recorded as an event and
+    reaches the student's goals, sessions and appointments rather than only the
+    student row. Archiving an already-archived student is a 409 rather than a
+    silent no-op: see the service module for why.
+    """
     repo = StudentRepository(db)
-    
+
     ensure_student_access(auth, student_id, action="archive student")
     allowed_student_ids = auth.allowed_student_ids if auth.enforce_access and not auth.is_admin else None
-    student = repo.archive_student(student_id, allowed_student_ids=allowed_student_ids)
+    try:
+        student = repo.archive_student(
+            student_id,
+            user_id=auth.effective_user.id,
+            allowed_student_ids=allowed_student_ids,
+        )
+    except archive_service.AlreadyArchivedError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if not student:
         raise HTTPException(status_code=404, detail="Student not found")
     
@@ -184,12 +234,21 @@ def unarchive_student(
     db: Session = Depends(get_db),
     auth: AuthContext = Depends(get_auth_context),
 ):
-    """Unarchive a student (restore to active lists)"""
+    """Unarchive a student (restore to active lists).
+
+    Restores the whole archive event the student was hidden by, so their goals,
+    sessions and appointments come back with them -- minus anything that was
+    already archived before, which keeps its own event and stays hidden.
+    """
     repo = StudentRepository(db)
-    
+
     ensure_student_access(auth, student_id, action="unarchive student")
     allowed_student_ids = auth.allowed_student_ids if auth.enforce_access and not auth.is_admin else None
-    student = repo.unarchive_student(student_id, allowed_student_ids=allowed_student_ids)
+    student = repo.unarchive_student(
+        student_id,
+        user_id=auth.effective_user.id,
+        allowed_student_ids=allowed_student_ids,
+    )
     if not student:
         raise HTTPException(status_code=404, detail="Student not found")
     

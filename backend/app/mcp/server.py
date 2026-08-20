@@ -41,6 +41,7 @@ from app.mcp.privacy import (
     sanitize_error_message,
     sanitize_tool_result,
 )
+from app.models.archive_event import ARCHIVABLE_ENTITY_TYPES
 from app.models.goal_objective import GoalObjective
 from app.models.iep_goal import IEPGoal
 from app.models.objective_progress_entry import ObjectiveProgressEntry
@@ -60,6 +61,7 @@ from app.repositories.student_repository import StudentRepository
 from app.repositories.teacher_repository import TeacherRepository
 from app.repositories.therapy_session_repository import TherapySessionRepository
 from app.repositories.time_block_repository import TimeBlockRepository
+from app.services import archive as archive_service
 from app.services import blind_import
 from app.routers.therapy_sessions import (
     _build_session_response,
@@ -122,10 +124,26 @@ always the same: student -> goal -> objective -> progress entry.
 
 Reading is free. The write tools change a clinical record that a school's IEP
 paperwork is built from, so say what you are about to write, and for whom,
-before you write it. Exactly TWO tools destroy anything —
-delete_progress_entry and delete_goal — and both refuse to run unless they are
-told confirm=true; delete_goal takes every objective and every progress entry
-under it with it.
+before you write it.
+
+NOTHING YOU CAN DO OVER THIS CONNECTION DESTROYS CLINICAL DATA. There is no
+delete tool for a student, a goal, an objective, a progress entry or a session
+— there are archive_* tools, and archiving HIDES a record from working lists
+while keeping every field of it. Each archive is one event with an id;
+list_archive_events shows those events and restore_archived(event_id,
+confirm=true) puts every row of one back. The archive_* tools still require
+confirm=true, and still show you the count of what they will hide first,
+because a therapist should know that her caseload is about to lose a goal — but
+the answer to "did I just lose that data" is always no.
+
+Archiving cascades DOWNWARD and only over records that are currently active:
+archive_goal hides the goal, its objectives and their progress entries;
+archive_student hides everything on that student. An objective archived last
+term keeps its own older event and is NOT swept into a new one, so restoring
+the new event never resurrects work that was retired on purpose.
+
+The ONE tool here that destroys anything is discard_import, and what it
+destroys is a staged upload, never a caseload record — see below.
 
 Two vocabularies are worth fetching before you write: list_goal_categories
 (every goal must name one) and list_eligibility_categories (the disability
@@ -163,7 +181,9 @@ design is that YOU NEVER SEE THE DATA:
   5. commit_import (confirm=true) creates the students from the stored file and
      hands you back aliases, never names.
   6. discard_import (confirm=true) destroys the staged copy. Offer it as soon
-     as the import is done.
+     as the import is done. This is the one irreversible tool on the server and
+     it is meant to be — what it destroys is a verbatim copy of somebody's
+     roster export, not a caseload record.
 
 Work with the therapist at every step: propose the mapping in plain language
 and let her correct it. She can see the spreadsheet; you cannot, and that is
@@ -474,8 +494,19 @@ def _student_identity(payload: dict, student: Student) -> dict:
     return payload
 
 
-def _load_goal(db: Session, ctx: McpPrincipal, goal_id: int) -> IEPGoal:
-    goal = db.query(IEPGoal).filter(IEPGoal.id == goal_id).first()
+# The four loaders below EXCLUDE ARCHIVED ROWS by default. An archived record
+# is hidden from every list tool, so a tool that could still fetch one by id
+# would be a second, unlisted way in -- and the agent would have no way to tell
+# a live goal from a retired one. `include_archived=True` is passed by exactly
+# one family of callers: the archive_* tools, which have to see an archived row
+# in order to say "already archived" rather than "no such id".
+def _load_goal(
+    db: Session, ctx: McpPrincipal, goal_id: int, include_archived: bool = False
+) -> IEPGoal:
+    query = db.query(IEPGoal).filter(IEPGoal.id == goal_id)
+    if not include_archived:
+        query = query.filter(IEPGoal.archived_at.is_(None))
+    goal = query.first()
     if goal is None:
         raise ValueError(
             f"No goal with id {goal_id}. Call list_goals for the ids that exist."
@@ -484,8 +515,13 @@ def _load_goal(db: Session, ctx: McpPrincipal, goal_id: int) -> IEPGoal:
     return goal
 
 
-def _load_objective(db: Session, ctx: McpPrincipal, objective_id: int) -> GoalObjective:
-    objective = db.query(GoalObjective).filter(GoalObjective.id == objective_id).first()
+def _load_objective(
+    db: Session, ctx: McpPrincipal, objective_id: int, include_archived: bool = False
+) -> GoalObjective:
+    query = db.query(GoalObjective).filter(GoalObjective.id == objective_id)
+    if not include_archived:
+        query = query.filter(GoalObjective.archived_at.is_(None))
+    objective = query.first()
     if objective is None:
         raise ValueError(
             f"No objective with id {objective_id}. Call list_objectives for a "
@@ -495,12 +531,15 @@ def _load_objective(db: Session, ctx: McpPrincipal, objective_id: int) -> GoalOb
     return objective
 
 
-def _load_entry(db: Session, ctx: McpPrincipal, entry_id: int) -> ObjectiveProgressEntry:
-    entry = (
-        db.query(ObjectiveProgressEntry)
-        .filter(ObjectiveProgressEntry.id == entry_id)
-        .first()
+def _load_entry(
+    db: Session, ctx: McpPrincipal, entry_id: int, include_archived: bool = False
+) -> ObjectiveProgressEntry:
+    query = db.query(ObjectiveProgressEntry).filter(
+        ObjectiveProgressEntry.id == entry_id
     )
+    if not include_archived:
+        query = query.filter(ObjectiveProgressEntry.archived_at.is_(None))
+    entry = query.first()
     if entry is None:
         raise ValueError(
             f"No progress entry with id {entry_id}. Call list_progress_entries "
@@ -510,8 +549,13 @@ def _load_entry(db: Session, ctx: McpPrincipal, entry_id: int) -> ObjectiveProgr
     return entry
 
 
-def _load_session(db: Session, ctx: McpPrincipal, session_id: int) -> TherapySession:
-    row = db.query(TherapySession).filter(TherapySession.id == session_id).first()
+def _load_session(
+    db: Session, ctx: McpPrincipal, session_id: int, include_archived: bool = False
+) -> TherapySession:
+    query = db.query(TherapySession).filter(TherapySession.id == session_id)
+    if not include_archived:
+        query = query.filter(TherapySession.archived_at.is_(None))
+    row = query.first()
     if row is None:
         raise ValueError(
             f"No therapy session with id {session_id}. Call "
@@ -519,6 +563,72 @@ def _load_session(db: Session, ctx: McpPrincipal, session_id: int) -> TherapySes
         )
     _require_student(ctx, row.student_id, f"therapy session {session_id}")
     return row
+
+
+def _archive_refusal(what: str, summary: dict) -> dict:
+    """The confirm=false answer, for every archive_* tool.
+
+    Same shape the old delete tools used, and deliberately so -- a client that
+    knew how to show `wouldDelete` gets `wouldArchive` in the same place. The
+    difference is in the wording, because the decision being confirmed is a
+    different one: this hides a record, it does not end it.
+    """
+    return {
+        "archived": False,
+        "reason": f"confirm must be true to archive {what}",
+        "wouldArchive": summary,
+        "note": (
+            "Archiving hides these records from working lists. Nothing is "
+            "deleted, every field is kept, and one call to restore_archived "
+            "puts all of it back."
+        ),
+    }
+
+
+def _student_alias_for(db: Session, student_id: Optional[int]) -> Optional[str]:
+    """`student_12` for an id, without loading the whole record."""
+    if student_id is None:
+        return None
+    row = db.query(Student).filter(Student.id == student_id).first()
+    return row.alias if row else None
+
+
+def _do_archive(
+    db: Session,
+    ctx: McpPrincipal,
+    entity_type: str,
+    entity_id: int,
+    reason: Optional[str],
+    summary: dict,
+) -> dict:
+    """The confirmed half of every archive_* tool.
+
+    One place, so the answer shape and the "already archived" refusal cannot
+    drift between six tools.
+    """
+    try:
+        event = archive_service.archive(
+            db,
+            user_id=ctx.user_id,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            reason=reason,
+        )
+    except archive_service.AlreadyArchivedError as exc:
+        raise ValueError(
+            f"{exc} Call list_archive_events to find it, or restore_archived "
+            f"to bring it back."
+        ) from None
+    return {
+        "archived": True,
+        "archiveEventId": event.id,
+        "hidden": summary,
+        "contents": archive_service.event_contents(db, event.id),
+        "note": (
+            "Nothing was deleted. Call restore_archived("
+            f"event_id={event.id}, confirm=true) to put all of it back."
+        ),
+    }
 
 
 # --------------------------------------------------------------------------
@@ -552,7 +662,11 @@ def get_caseload_overview() -> dict:
             by_status[key] = by_status.get(key, 0) + 1
 
         goals = (
-            db.query(IEPGoal).filter(IEPGoal.student_id.in_(ids)).all() if ids else []
+            db.query(IEPGoal)
+            .filter(IEPGoal.student_id.in_(ids), IEPGoal.archived_at.is_(None))
+            .all()
+            if ids
+            else []
         )
         goals_by_status: dict[str, int] = {}
         for goal in goals:
@@ -567,6 +681,7 @@ def get_caseload_overview() -> dict:
             .join(IEPGoal, GoalObjective.goal_id == IEPGoal.id)
             .filter(IEPGoal.student_id.in_(ids))
             .filter(ObjectiveProgressEntry.progress_date >= recent_cutoff)
+            .filter(ObjectiveProgressEntry.archived_at.is_(None))
             .count()
             if ids
             else 0
@@ -679,11 +794,20 @@ def get_student(student_id: int) -> dict:
     try:
         ctx = _ctx()
         _require_student(ctx, student_id, "this student")
-        student = StudentRepository(db).get_student_by_id(student_id)
+        # `include_archived=False` on purpose. The repository default is True
+        # because the React student page is where a therapist unarchives, and
+        # hiding the row there would take the button away. This connection has
+        # no such page: an agent that can read an archived student's whole
+        # record by id would be quoting a retired record as a live one.
+        # list_archive_events is where an archived student is visible here.
+        student = StudentRepository(db).get_student_by_id(
+            student_id, include_archived=False
+        )
         if student is None:
             raise ValueError(
                 f"No student with id {student_id}. Call list_students for the "
-                f"ids that exist."
+                f"ids that exist, or list_archive_events if you think this one "
+                f"was archived."
             )
         return _student_identity(_dump(StudentRead, student), student)
     finally:
@@ -703,8 +827,11 @@ def list_goals(
     logged against those steps are PROGRESS ENTRIES. `goal_status` is the app's
     own vocabulary — "Active" and "Mastered" are the common ones.
 
+    Only ACTIVE goals come back. Archived goals are hidden here by design --
+    list_archive_events is where they are, and restore_archived brings one back.
+
     Omit `student_id` to sweep the whole caseload. Each row's `id` is the
-    `goal_id` for get_goal, list_objectives, update_goal and delete_goal.
+    `goal_id` for get_goal, list_objectives, update_goal and archive_goal.
     """
     db = _session()
     try:
@@ -944,6 +1071,8 @@ def get_schedule(
                         for assignment in b.block_assignments
                         if assignment.status == "assigned"
                         and assignment.student is not None
+                        # The join row is never archived; the student can be.
+                        and assignment.student.archived_at is None
                         and ctx.may_see_student(assignment.student.id)
                     ],
                 }
@@ -1081,7 +1210,8 @@ def update_progress_entry(
     changed; anything omitted is left exactly as it was.
 
     `entry_id` comes from list_progress_entries. To remove an entry entirely
-    use delete_progress_entry, which refuses without confirm=true.
+    use archive_progress_entry, which hides it (recoverably) and refuses
+    without confirm=true.
     """
     db = _session()
     try:
@@ -1480,29 +1610,44 @@ def update_student(
 
 
 # --------------------------------------------------------------------------
-# destructive tools — both refuse without confirm=true
+# archive tools — recoverable by design, and all refuse without confirm=true
 # --------------------------------------------------------------------------
+# There are no delete tools here any more. `archive_*` stamps a record and
+# everything under it with one archive event and hides it from working lists;
+# `list_archive_events` shows those events and `restore_archived` reverses one.
+# Every field of every archived row is still in the database.
+#
+# The confirm=true gate is KEPT even though nothing is destroyed. It is not
+# there to protect the data (the restore does that) -- it is there so that a
+# therapist finds out her caseload is about to lose a goal from a summary she
+# was shown, rather than from the goal being gone. The refusal branch returns
+# the counts of what would be hidden, exactly as the old delete tools did.
 @tool()
-def delete_progress_entry(entry_id: int, confirm: bool = False) -> dict:
+def archive_progress_entry(
+    entry_id: int, confirm: bool = False, reason: Optional[str] = None
+) -> dict:
     """
-    WRITE — DESTRUCTIVE. Permanently removes one progress entry.
+    WRITE — archives one progress entry. RECOVERABLE; nothing is destroyed.
 
-    There is no undo and no archive: the observation, its date, its notes and
-    its attribution are gone, and if it was the only data taken that week the
-    gap is simply a gap on the next progress report.
+    The observation, its date, its notes and its attribution are all kept. The
+    entry stops appearing in list_progress_entries and stops counting towards
+    the objective's progress, and that is the whole of the change. The call
+    returns an `archiveEventId`; restore_archived(that id, confirm=true) puts
+    the entry back exactly as it was.
 
     `confirm` must be literally true. Anything else — false, "yes", omitted —
-    refuses and deletes nothing, and returns a summary of what WOULD have gone,
-    so a record can never disappear because a tool call was half-formed. Show
+    archives nothing and returns a summary of what WOULD be hidden, so a record
+    can never vanish from a caseload because a tool call was half-formed. Show
     that summary to a human and get an answer before you send confirm=true.
 
     `entry_id` comes from list_progress_entries. To fix a wrong value, prefer
-    update_progress_entry.
+    update_progress_entry — archiving is for an entry that should not have been
+    logged at all.
     """
     db = _session()
     try:
         ctx = _ctx()
-        entry = _load_entry(db, ctx, entry_id)
+        entry = _load_entry(db, ctx, entry_id, include_archived=True)
         objective = entry.objective
         goal = objective.goal
         summary = {
@@ -1515,63 +1660,357 @@ def delete_progress_entry(entry_id: int, confirm: bool = False) -> dict:
             "objectiveNumber": objective.objective_number,
             "goalId": goal.id,
             "studentId": goal.student_id,
+            "student": _student_alias_for(db, goal.student_id),
+            "willArchive": archive_service.preview(
+                db, archive_service.ENTITY_PROGRESS_ENTRY, entry_id
+            ),
         }
         if confirm is not True:
-            return {
-                "deleted": False,
-                "reason": "confirm must be true to delete this progress entry",
-                "wouldDelete": summary,
-            }
-        ProgressEntryRepository(db).delete_progress_entry(entry_id)
-        return {"deleted": True, "removed": summary}
+            return _archive_refusal("this progress entry", summary)
+        return _do_archive(
+            db, ctx, archive_service.ENTITY_PROGRESS_ENTRY, entry_id, reason, summary
+        )
     finally:
         db.close()
 
 
 @tool()
-def delete_goal(goal_id: int, confirm: bool = False) -> dict:
+def archive_objective(
+    objective_id: int, confirm: bool = False, reason: Optional[str] = None
+) -> dict:
     """
-    WRITE — DESTRUCTIVE, AND THE WIDEST-REACHING TOOL HERE. Permanently removes
-    an IEP goal AND EVERYTHING UNDER IT: every objective, and every progress
-    entry ever logged against those objectives.
+    WRITE — archives one objective AND the progress entries under it.
+    RECOVERABLE; nothing is destroyed.
 
-    That history is the evidence a school has that services were delivered.
-    Nothing else records it, and it cannot be recovered. In almost every case
-    the thing you actually want is update_goal with goal_status="Mastered" or
-    "Discontinued", which keeps the record and stops the goal appearing as
-    active work.
+    The objective stops appearing under its goal and its entries stop appearing
+    in list_progress_entries. Every row is kept, and one call to
+    restore_archived with the returned `archiveEventId` brings the whole set
+    back together.
 
-    `confirm` must be literally true. Without it this deletes nothing and
-    instead returns a count of the objectives and entries that would go — show
-    that to a human and get an answer before sending confirm=true.
+    `confirm` must be literally true. Without it this archives nothing and
+    instead returns the count of entries that would be hidden — show that to a
+    human and get an answer before sending confirm=true.
+
+    `objective_id` comes from list_objectives. If the objective is simply
+    finished, update_objective with a progress_status is usually what you want:
+    it keeps the objective visible as completed work.
+    """
+    db = _session()
+    try:
+        ctx = _ctx()
+        objective = _load_objective(db, ctx, objective_id, include_archived=True)
+        goal = objective.goal
+        summary = {
+            "objectiveId": objective.id,
+            "objectiveNumber": objective.objective_number,
+            "objectiveDescription": objective.objective_description,
+            "goalId": goal.id,
+            "studentId": goal.student_id,
+            "student": _student_alias_for(db, goal.student_id),
+            "willArchive": archive_service.preview(
+                db, archive_service.ENTITY_OBJECTIVE, objective_id
+            ),
+        }
+        if confirm is not True:
+            return _archive_refusal("this objective and its progress entries", summary)
+        return _do_archive(
+            db, ctx, archive_service.ENTITY_OBJECTIVE, objective_id, reason, summary
+        )
+    finally:
+        db.close()
+
+
+@tool()
+def archive_goal(goal_id: int, confirm: bool = False, reason: Optional[str] = None) -> dict:
+    """
+    WRITE — archives an IEP goal AND EVERYTHING UNDER IT: every objective, and
+    every progress entry logged against those objectives. RECOVERABLE; nothing
+    is destroyed.
+
+    This is the widest-reaching archive on a single goal, and the history it
+    hides is the evidence a school has that services were delivered — so say
+    what is about to disappear from the caseload before you do it. But it does
+    not disappear from the DATABASE: every row keeps every field, and
+    restore_archived with the returned `archiveEventId` brings the whole tree
+    back.
+
+    In most cases the thing you actually want is update_goal with
+    goal_status="Mastered" or "Discontinued", which keeps the goal visible as
+    finished work. Archive is for a goal that should not be on the caseload at
+    all.
+
+    An objective already archived under an EARLIER event keeps that event and is
+    not swept into this one, so restoring this event will not resurrect work
+    that was retired on purpose.
+
+    `confirm` must be literally true. Without it this archives nothing and
+    returns a count of the objectives and entries that would be hidden.
 
     `goal_id` comes from list_goals.
     """
     db = _session()
     try:
         ctx = _ctx()
-        goal = _load_goal(db, ctx, goal_id)
+        goal = _load_goal(db, ctx, goal_id, include_archived=True)
         objectives = list(goal.objectives or [])
         summary = {
             "goalId": goal.id,
             "studentId": goal.student_id,
+            "student": _student_alias_for(db, goal.student_id),
             "goalNumber": goal.goal_number,
             "goalDescription": goal.goal_description,
             "goalStatus": goal.goal_status,
             "objectives": len(objectives),
-            "progressEntries": sum(
-                len(o.progress_entries or []) for o in objectives
-            ),
+            "progressEntries": sum(len(o.progress_entries or []) for o in objectives),
             "objectiveNumbers": sorted(o.objective_number for o in objectives),
+            "willArchive": archive_service.preview(
+                db, archive_service.ENTITY_GOAL, goal_id
+            ),
         }
         if confirm is not True:
+            return _archive_refusal("this goal and everything under it", summary)
+        return _do_archive(db, ctx, archive_service.ENTITY_GOAL, goal_id, reason, summary)
+    finally:
+        db.close()
+
+
+@tool()
+def archive_therapy_session(
+    session_id: int, confirm: bool = False, reason: Optional[str] = None
+) -> dict:
+    """
+    WRITE — archives one therapy session. RECOVERABLE; nothing is destroyed.
+
+    The session, its notes, its planned goals and objectives stop appearing in
+    list_therapy_sessions and stop counting towards session statistics.
+
+    The PROGRESS ENTRIES logged during the session are deliberately left active.
+    They belong to an objective, not to the session, and they are the record
+    that a service was delivered — hiding a session must not blank a child's
+    data. If you mean to hide an entry too, archive_progress_entry does that
+    one at a time.
+
+    `confirm` must be literally true. Without it nothing is archived and a
+    summary comes back instead. `session_id` comes from list_therapy_sessions.
+    """
+    db = _session()
+    try:
+        ctx = _ctx()
+        row = _load_session(db, ctx, session_id, include_archived=True)
+        summary = {
+            "sessionId": row.id,
+            "studentId": row.student_id,
+            "student": _student_alias_for(db, row.student_id),
+            "sessionDate": row.session_date.isoformat() if row.session_date else None,
+            "status": row.status,
+            "sessionType": row.session_type,
+            "appointmentId": row.appointment_id,
+            "progressEntriesLeftActive": len(row.progress_entries or []),
+            "willArchive": archive_service.preview(
+                db, archive_service.ENTITY_THERAPY_SESSION, session_id
+            ),
+        }
+        if confirm is not True:
+            return _archive_refusal("this therapy session", summary)
+        return _do_archive(
+            db, ctx, archive_service.ENTITY_THERAPY_SESSION, session_id, reason, summary
+        )
+    finally:
+        db.close()
+
+
+@tool()
+def archive_student(
+    student_id: int, confirm: bool = False, reason: Optional[str] = None
+) -> dict:
+    """
+    WRITE — THE WIDEST-REACHING TOOL HERE. Archives a student AND their whole
+    record: every IEP goal, every objective, every progress entry, every therapy
+    session and every appointment. RECOVERABLE; nothing is destroyed.
+
+    This is what you use when a child leaves the caseload. Their record stops
+    appearing anywhere — list_students, list_goals, the schedule, the statistics
+    — and stays complete in the database. restore_archived with the returned
+    `archiveEventId` brings the entire record back at once.
+
+    Anything already archived under an EARLIER event keeps that event: restoring
+    this one returns the student to the caseload without undoing a goal that was
+    retired months ago.
+
+    `confirm` must be literally true. Without it this archives nothing and
+    returns the counts — goals, objectives, entries, sessions, appointments —
+    that would be hidden. That count is what you show a human. This is a large
+    change to a caseload and should never be the first thing you do in a
+    conversation.
+
+    `student_id` comes from list_students. The student is identified by alias
+    ("student_12") in everything this tool returns.
+    """
+    db = _session()
+    try:
+        ctx = _ctx()
+        _require_student(ctx, student_id, "archiving this student")
+        student = db.query(Student).filter(Student.id == student_id).first()
+        if student is None:
+            raise ValueError(
+                f"No student with id {student_id}. Call list_students for the "
+                f"ids that exist."
+            )
+        summary = {
+            "studentId": student.id,
+            "student": student.alias,
+            "enrollmentStatus": student.enrollment_status,
+            "gradeLevel": student.grade_level,
+            "willArchive": archive_service.preview(
+                db, archive_service.ENTITY_STUDENT, student_id
+            ),
+        }
+        if confirm is not True:
+            return _archive_refusal("this student and their whole record", summary)
+        return _do_archive(
+            db, ctx, archive_service.ENTITY_STUDENT, student_id, reason, summary
+        )
+    finally:
+        db.close()
+
+
+@tool()
+def list_archive_events(
+    include_restored: bool = False,
+    root_entity_type: Optional[str] = None,
+    limit: int = 50,
+) -> list[dict]:
+    """
+    Everything that has been archived on this caseload, newest first — the
+    undo history.
+
+    One row per archive action: what was archived (`rootEntityType` +
+    `rootEntityId`), when, why (if a reason was given), how many rows of each
+    kind it still holds (`contents`), and whether it has already been restored.
+    Students appear as aliases ("student_12"), never as names.
+
+    `eventId` is what restore_archived wants. `include_restored=false` (the
+    default) shows only archives that are still in force, which is what you want
+    when somebody asks "what did I hide?". `root_entity_type` narrows to one
+    kind: student, goal, objective, progress_entry, therapy_session,
+    appointment, time_block.
+
+    An ADMIN sees every user's events, because restore_archived lets an admin
+    restore every user's events; `ownedByCaller` says which are their own. A
+    therapist sees only their own, and `ownedByCaller` is true on all of them.
+
+    Use this before restore_archived, always: it is how you find the event id
+    and how you tell a human what putting it back would bring with it.
+    """
+    db = _session()
+    try:
+        ctx = _ctx()
+        if root_entity_type is not None and root_entity_type not in ARCHIVABLE_ENTITY_TYPES:
+            raise ValueError(
+                f"Unknown entity type '{root_entity_type}'. Expected one of: "
+                f"{', '.join(sorted(ARCHIVABLE_ENTITY_TYPES))}."
+            )
+        # `None` means every user's events. It is what an admin gets, and it
+        # has to be, because `restore_archived` already lets an admin restore
+        # an event they do not own: listing scoped to self would leave them
+        # able to restore only by GUESSING an id -- a blind write against a
+        # record they were never shown. The caseload check below still applies
+        # to every row, admin or not.
+        events = archive_service.list_events(
+            db,
+            user_id=None if ctx.is_admin else ctx.user_id,
+            include_restored=include_restored,
+            root_entity_type=root_entity_type,
+            limit=max(1, min(int(limit), 200)),
+        )
+        rows = []
+        for event in events:
+            payload = archive_service.event_summary(db, event)
+            payload["ownedByCaller"] = event.user_id == ctx.user_id
+            # Every event is scoped to a student where one exists, and it is
+            # named by ALIAS -- the same identity every other tool uses.
+            try:
+                student_id = archive_service.root_student_id(
+                    db, event.root_entity_type, event.root_entity_id
+                )
+            except archive_service.ArchiveError:
+                student_id = None
+            if student_id is not None and not ctx.may_see_student(student_id):
+                continue
+            payload["student"] = _student_alias_for(db, student_id)
+            payload["studentId"] = student_id
+            rows.append(payload)
+        return rows
+    finally:
+        db.close()
+
+
+@tool()
+def restore_archived(event_id: int, confirm: bool = False) -> dict:
+    """
+    WRITE — puts one archive event's records back on the caseload. This is the
+    undo for every archive_* tool.
+
+    It restores EXACTLY the rows that event archived and nothing else. Anything
+    that was already archived when the event ran kept its own older event and
+    stays archived — so restoring a student does not resurrect a goal that was
+    retired before she left.
+
+    Restoring a record whose PARENT is still archived is refused: putting a goal
+    back under a hidden student would leave a row nothing can reach. The refusal
+    names the parent's event so you know which one to restore first.
+
+    `confirm` must be literally true — this changes what appears on a working
+    caseload, and the therapist should be the one deciding that a record comes
+    back. Without it nothing is restored and a summary of what would return
+    comes back instead.
+
+    `event_id` comes from list_archive_events.
+    """
+    db = _session()
+    try:
+        ctx = _ctx()
+        try:
+            event = archive_service.get_event(db, event_id)
+        except archive_service.EntityNotFoundError as exc:
+            raise ValueError(str(exc)) from None
+
+        if event.user_id != ctx.user_id and not ctx.is_admin:
+            raise ValueError(
+                f"Archive event {event_id} does not belong to you. Call "
+                f"list_archive_events for the events you can restore."
+            )
+        student_id = archive_service.root_student_id(
+            db, event.root_entity_type, event.root_entity_id
+        )
+        if student_id is not None:
+            _require_student(ctx, student_id, f"archive event {event_id}")
+
+        summary = archive_service.event_summary(db, event)
+        summary["student"] = _student_alias_for(db, student_id)
+        summary["studentId"] = student_id
+
+        if confirm is not True:
             return {
-                "deleted": False,
-                "reason": "confirm must be true to delete this goal and everything under it",
-                "wouldDelete": summary,
+                "restored": False,
+                "reason": "confirm must be true to restore this archive event",
+                "wouldRestore": summary,
             }
-        GoalRepository(db).delete_goal(goal_id)
-        return {"deleted": True, "removed": summary}
+
+        try:
+            result = archive_service.restore(db, user_id=ctx.user_id, event_id=event_id)
+        except archive_service.AlreadyRestoredError as exc:
+            raise ValueError(str(exc)) from None
+        except archive_service.ParentStillArchivedError as exc:
+            raise ValueError(str(exc)) from None
+
+        result["student"] = _student_alias_for(db, student_id)
+        result["note"] = (
+            "Only the rows this event archived came back. Anything archived "
+            "under a different event is still archived -- call "
+            "list_archive_events to see what is left."
+        )
+        return result
     finally:
         db.close()
 
@@ -1810,6 +2249,12 @@ def discard_import(batch_id: int, confirm: bool = False) -> dict:
     """
     WRITE - DESTRUCTIVE, AND DESTRUCTION IS THE POINT. Deletes the import batch
     and every staged row of the uploaded spreadsheet.
+
+    THE ONLY IRREVERSIBLE TOOL ON THIS SERVER, and the only one with no archive
+    behind it -- because here the destruction is a privacy feature rather than a
+    data-management one. Every other tool that hides a record (archive_student,
+    archive_goal, and the rest) keeps every field and can be undone with
+    restore_archived. This one cannot, on purpose.
 
     Those rows are the only verbatim copy of the therapist's roster export on
     this server -- real names, real birthdays, real identifiers, sitting in a

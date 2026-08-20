@@ -1,9 +1,10 @@
 from sqlalchemy import Column, Integer, String, DateTime, Boolean, Text, ForeignKey, func
 from sqlalchemy.orm import relationship
 from app.db.base import Base
+from app.models.archive_event import ArchivableMixin
 
 
-class TimeBlock(Base):
+class TimeBlock(ArchivableMixin, Base):
     __tablename__ = "time_blocks"
 
     id = Column(Integer, primary_key=True, index=True)
@@ -48,8 +49,13 @@ class TimeBlock(Base):
 
     @property
     def current_student_count(self) -> int:
-        """Count of currently assigned students"""
-        return len([assignment for assignment in self.block_assignments if assignment.status == 'assigned'])
+        """Count of currently assigned students.
+
+        Derived from `assigned_students` rather than counted off
+        `block_assignments` directly, so that the count and the roster cannot
+        disagree about whether an archived child is on this block.
+        """
+        return len(self.assigned_students)
 
     @property
     def is_full(self) -> bool:
@@ -67,9 +73,26 @@ class TimeBlock(Base):
 
     @property
     def assigned_students(self):
-        """List of students currently assigned to this block"""
-        return [assignment.student for assignment in self.block_assignments 
-                if assignment.status == 'assigned']
+        """List of students currently assigned to this block.
+
+        An ARCHIVED student is not on it. `block_assignments` rows are never
+        archived (they are join rows with no clinical content, and leaving them
+        alone is what lets a restore hand the group back whole -- see
+        `app/services/archive.py`), so the archived child has to be filtered out
+        HERE, where the roster is read.
+
+        This property is the source of `current_student_count`,
+        `available_spots` and `calculate_student_time_slots`, so an archived
+        student counted here would take a slot in the group, shrink everybody
+        else's minutes and appear by name in the block's REST payload.
+        """
+        return [
+            assignment.student
+            for assignment in self.block_assignments
+            if assignment.status == 'assigned'
+            and assignment.student is not None
+            and assignment.student.archived_at is None
+        ]
     
     def calculate_student_time_slots(self):
         """Calculate individual time slots for each assigned student"""

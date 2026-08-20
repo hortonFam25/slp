@@ -2,9 +2,10 @@ from sqlalchemy import Column, Integer, String, DateTime, Boolean, Text, Foreign
 from sqlalchemy.orm import relationship
 import json
 from app.db.base import Base
+from app.models.archive_event import ArchivableMixin
 
 
-class Appointment(Base):
+class Appointment(ArchivableMixin, Base):
     __tablename__ = "appointments"
 
     id = Column(Integer, primary_key=True, index=True)

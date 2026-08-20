@@ -11,12 +11,32 @@ from app.models.teacher import Teacher
 from app.models.school import School
 from app.schemas.time_block import TimeBlockCreate, TimeBlockUpdate
 
+from app.services import archive as archive_service
+
 logger = logging.getLogger(__name__)
 
 _WEEKDAY_NAMES = ('Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun')
 
 
 class TimeBlockRepository:
+    """Group time blocks, their assignments and the appointments they produce.
+
+    ARCHIVE FILTERING. Time blocks are archivable, and so are the appointments
+    and therapy sessions a block creates. Every read path here excludes archived
+    rows unless `include_archived=True` is passed, including
+    `check_teacher_conflict`: an archived block must stop occupying the
+    therapist's calendar, for the same reason an archived appointment stops
+    occupying its slot.
+
+    BLOCK ASSIGNMENTS ARE NOT ARCHIVED. `block_assignments` is a join row
+    between a student and a block; it carries no clinical content and has no
+    archive columns. Archiving a block hides the block and its appointments, and
+    the membership rows stay exactly as they were -- which is what lets a restore
+    put the group back intact instead of reconstructing it. `get_block_students`
+    does skip archived STUDENTS, because an archived child is not on the
+    caseload the roster is showing.
+    """
+
     def __init__(self, db: Session):
         self.db = db
 
@@ -28,17 +48,29 @@ class TimeBlockRepository:
         self.db.refresh(time_block)
         return time_block
 
-    def get_time_block(self, time_block_id: int) -> Optional[TimeBlock]:
-        """Get time block by ID with related data"""
-        return self.db.query(TimeBlock).options(
+    def get_time_block(
+        self, time_block_id: int, include_archived: bool = False
+    ) -> Optional[TimeBlock]:
+        """Get time block by ID with related data.
+
+        An archived block reads as absent by default, which turns its id into a
+        404 -- the answer a caller used to get after a delete.
+        """
+        query = self.db.query(TimeBlock).options(
             joinedload(TimeBlock.teacher),
             joinedload(TimeBlock.school),
             joinedload(TimeBlock.block_assignments).joinedload(BlockAssignment.student)
-        ).filter(TimeBlock.id == time_block_id).first()
+        ).filter(TimeBlock.id == time_block_id)
+        if not include_archived:
+            query = query.filter(TimeBlock.archived_at.is_(None))
+        return query.first()
 
     def update_time_block(self, time_block_id: int, time_block_data: TimeBlockUpdate) -> Optional[TimeBlock]:
-        """Update a time block"""
-        time_block = self.db.query(TimeBlock).filter(TimeBlock.id == time_block_id).first()
+        """Update a time block. An archived block is not editable."""
+        time_block = self.db.query(TimeBlock).filter(
+            TimeBlock.id == time_block_id,
+            TimeBlock.archived_at.is_(None),
+        ).first()
         if time_block:
             update_data = time_block_data.dict(exclude_unset=True)
             for field, value in update_data.items():
@@ -62,7 +94,7 @@ class TimeBlockRepository:
         ).filter(
             and_(
                 Student.enrollment_status == 'Active',
-                Student.is_archived == False
+                Student.archived_at.is_(None)
             )
         )
         
@@ -91,7 +123,8 @@ class TimeBlockRepository:
             joinedload(Appointment.therapy_session),
             joinedload(Appointment.student)
         ).filter(
-            Appointment.time_block_id == time_block_id
+            Appointment.time_block_id == time_block_id,
+            Appointment.archived_at.is_(None),
         ).order_by(Appointment.start_datetime).all()
         
         # Group by series_id
@@ -376,7 +409,8 @@ class TimeBlockRepository:
         ).filter(
             and_(
                 Appointment.series_id == series_id,
-                Appointment.time_block_id.isnot(None)
+                Appointment.time_block_id.isnot(None),
+                Appointment.archived_at.is_(None)
             )
         ).order_by(Appointment.start_datetime).all()
         
@@ -519,7 +553,8 @@ class TimeBlockRepository:
         ).filter(
             and_(
                 Appointment.series_id == series_id,
-                Appointment.time_block_id.isnot(None)
+                Appointment.time_block_id.isnot(None),
+                Appointment.archived_at.is_(None)
             )
         ).order_by(Appointment.start_datetime).all()
         
@@ -768,7 +803,10 @@ class TimeBlockRepository:
             existing_appointment = self.db.query(Appointment).filter(
                 and_(
                     Appointment.student_id == student.id,
-                    Appointment.time_block_id == time_block_id
+                    Appointment.time_block_id == time_block_id,
+                    # An archived appointment is not "existing" -- reusing it
+                    # would resurrect a row the therapist took off the calendar.
+                    Appointment.archived_at.is_(None)
                 )
             ).first()
             
@@ -863,7 +901,10 @@ class TimeBlockRepository:
             existing_appointment = self.db.query(Appointment).filter(
                 and_(
                     Appointment.student_id == student.id,
-                    Appointment.time_block_id == time_block_id
+                    Appointment.time_block_id == time_block_id,
+                    # An archived appointment is not "existing" -- reusing it
+                    # would resurrect a row the therapist took off the calendar.
+                    Appointment.archived_at.is_(None)
                 )
             ).first()
             
@@ -891,60 +932,41 @@ class TimeBlockRepository:
             "time_slots": time_slots
         }
 
-    def delete_time_block(self, time_block_id: int) -> bool:
-        """Delete a time block and all associated appointments, therapy sessions, goals, and objectives"""
-        from app.models.therapy_session import TherapySession
-        from app.models.session_goal import SessionGoal
-        from app.models.session_objective import SessionObjective
-        from app.repositories.appointment_repository import AppointmentRepository
-        
-        time_block = self.db.query(TimeBlock).filter(TimeBlock.id == time_block_id).first()
+    def archive_time_block(
+        self, time_block_id: int, user_id: int, reason: Optional[str] = None
+    ) -> Optional["archive_service.ArchiveEvent"]:
+        """Archive a time block with its appointments and therapy sessions.
+
+        Replaces `delete_time_block`, which walked exactly this set and
+        destroyed it. The cascade lives in `app.services.archive` so that this
+        method, the DELETE route and any future caller cannot disagree about
+        what a block "contains".
+
+        Block assignments and activities are left in place -- see the class
+        docstring. They were only deleted before because a foreign key forced
+        it, and keeping them is what lets a restore hand the group back whole.
+
+        Returns None when there is no such (active) block.
+        """
+        time_block = self.db.query(TimeBlock).filter(
+            TimeBlock.id == time_block_id,
+            TimeBlock.archived_at.is_(None),
+        ).first()
         if not time_block:
-            return False
-        
-        logger.info("Deleting time block %s and all associated appointments", time_block_id)
-        
-        # Get all appointments associated with this time block
-        appointments = self.db.query(Appointment).filter(
-            Appointment.time_block_id == time_block_id
-        ).all()
-        
-        if appointments:
-            logger.info("Found %d appointments to delete", len(appointments))
-            
-            # Use the appointment repository to properly delete each appointment
-            # This ensures therapy sessions, goals, and objectives are also deleted
-            appointment_repo = AppointmentRepository(self.db)
-            for appointment in appointments:
-                # We need to handle this manually since we're already in a transaction
-                therapy_session = self.db.query(TherapySession).filter(
-                    TherapySession.appointment_id == appointment.id
-                ).first()
-                
-                if therapy_session:
-                    # Delete session goals and objectives
-                    self.db.query(SessionGoal).filter(
-                        SessionGoal.therapy_session_id == therapy_session.id
-                    ).delete(synchronize_session=False)
-                    
-                    self.db.query(SessionObjective).filter(
-                        SessionObjective.therapy_session_id == therapy_session.id
-                    ).delete(synchronize_session=False)
-                    
-                    # Delete therapy session
-                    self.db.delete(therapy_session)
-                
-                # Delete appointment
-                self.db.delete(appointment)
-            
-            logger.info("Deleted %d appointments and their therapy data", len(appointments))
-        
-        # Delete the time block (block assignments and activities should cascade due to foreign key constraints)
-        self.db.delete(time_block)
-        self.db.commit()
-        
-        logger.info("Successfully deleted time block %s", time_block_id)
-        return True
+            return None
+
+        logger.info("Archiving time block %s and its appointments", time_block_id)
+        event = archive_service.archive(
+            self.db,
+            user_id=user_id,
+            entity_type=archive_service.ENTITY_TIME_BLOCK,
+            entity_id=time_block_id,
+            reason=reason,
+        )
+        logger.info(
+            "Archived time block %s under archive event %s", time_block_id, event.id
+        )
+        return event
 
     def get_time_blocks_by_date_range(
         self,
@@ -953,7 +975,8 @@ class TimeBlockRepository:
         teacher_id: Optional[int] = None,
         school_id: Optional[int] = None,
         block_type: Optional[str] = None,
-        status: Optional[str] = None
+        status: Optional[str] = None,
+        include_archived: bool = False,
     ) -> List[TimeBlock]:
         """Get time blocks within a date range with optional filters"""
         query = self.db.query(TimeBlock).options(
@@ -961,6 +984,9 @@ class TimeBlockRepository:
             joinedload(TimeBlock.school),
             joinedload(TimeBlock.block_assignments).joinedload(BlockAssignment.student)
         )
+
+        if not include_archived:
+            query = query.filter(TimeBlock.archived_at.is_(None))
 
         # Date range filter
         start_datetime = datetime.combine(start_date, datetime.min.time())
@@ -988,13 +1014,17 @@ class TimeBlockRepository:
         self,
         teacher_id: int,
         start_date: Optional[date] = None,
-        end_date: Optional[date] = None
+        end_date: Optional[date] = None,
+        include_archived: bool = False,
     ) -> List[TimeBlock]:
         """Get all time blocks for a specific teacher"""
         query = self.db.query(TimeBlock).options(
             joinedload(TimeBlock.school),
             joinedload(TimeBlock.block_assignments).joinedload(BlockAssignment.student)
         ).filter(TimeBlock.teacher_id == teacher_id)
+
+        if not include_archived:
+            query = query.filter(TimeBlock.archived_at.is_(None))
 
         if start_date and end_date:
             start_datetime = datetime.combine(start_date, datetime.min.time())
@@ -1013,7 +1043,8 @@ class TimeBlockRepository:
         start_date: date,
         end_date: date,
         school_id: Optional[int] = None,
-        block_type: Optional[str] = None
+        block_type: Optional[str] = None,
+        include_archived: bool = False,
     ) -> List[TimeBlock]:
         """Get time blocks that have available spots"""
         query = self.db.query(TimeBlock).options(
@@ -1021,6 +1052,9 @@ class TimeBlockRepository:
             joinedload(TimeBlock.school),
             joinedload(TimeBlock.block_assignments).joinedload(BlockAssignment.student)
         )
+
+        if not include_archived:
+            query = query.filter(TimeBlock.archived_at.is_(None))
 
         # Date range filter
         start_datetime = datetime.combine(start_date, datetime.min.time())
@@ -1056,10 +1090,15 @@ class TimeBlockRepository:
         end_datetime: datetime,
         exclude_block_id: Optional[int] = None
     ) -> bool:
-        """Check if teacher has conflicting time blocks in the time slot"""
+        """Check if teacher has conflicting time blocks in the time slot.
+
+        SCHEDULING DECISION: archived blocks never conflict -- see the class
+        docstring.
+        """
         query = self.db.query(TimeBlock).filter(
             and_(
                 TimeBlock.teacher_id == teacher_id,
+                TimeBlock.archived_at.is_(None),
                 TimeBlock.status.in_(['active']),
                 or_(
                     # New block starts during existing block
@@ -1133,15 +1172,26 @@ class TimeBlockRepository:
             return True
         return False
 
-    def get_block_students(self, time_block_id: int) -> List[Student]:
-        """Get all students assigned to a time block"""
-        assignments = self.db.query(BlockAssignment).options(
+    def get_block_students(
+        self, time_block_id: int, include_archived: bool = False
+    ) -> List[Student]:
+        """Get all students assigned to a time block.
+
+        The ASSIGNMENT rows are never archived (see the class docstring); the
+        archived STUDENTS behind them are filtered out here, because an archived
+        child is not on the caseload this roster is showing.
+        """
+        query = self.db.query(BlockAssignment).join(
+            Student, BlockAssignment.student_id == Student.id
+        ).options(
             joinedload(BlockAssignment.student)
         ).filter(
             and_(
                 BlockAssignment.time_block_id == time_block_id,
                 BlockAssignment.status == 'assigned'
             )
-        ).all()
+        )
+        if not include_archived:
+            query = query.filter(Student.archived_at.is_(None))
 
-        return [assignment.student for assignment in assignments]
+        return [assignment.student for assignment in query.all()]

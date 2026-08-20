@@ -2,9 +2,10 @@ from sqlalchemy import Column, Integer, String, DateTime, Text, ForeignKey, Bool
 from sqlalchemy.orm import relationship
 import json
 from app.db.base import Base
+from app.models.archive_event import ArchivableMixin
 
 
-class TherapySession(Base):
+class TherapySession(ArchivableMixin, Base):
     __tablename__ = "therapy_sessions"
 
     id = Column(Integer, primary_key=True, index=True)
@@ -113,8 +114,19 @@ class TherapySession(Base):
 
     @property
     def progress_entries_count(self) -> int:
-        """Count of progress entries made during session"""
-        return len(self.progress_entries)
+        """Count of progress entries made during session.
+
+        Archived entries are not counted. This number goes out on every
+        therapy-session payload, REST and MCP alike, and nothing upstream of it
+        filters the relationship.
+        """
+        return len(
+            [
+                entry
+                for entry in (self.progress_entries or [])
+                if entry.archived_at is None
+            ]
+        )
 
     @property
     def is_part_of_series(self) -> bool:

@@ -90,6 +90,7 @@ def get_appointments(
     school_id: Optional[int] = Query(None, description="Filter by school ID"),
     appointment_type: Optional[str] = Query(None, description="Filter by appointment type"),
     status: Optional[str] = Query(None, description="Filter by status"),
+    include_archived: bool = Query(False, description="Include archived rows (archived means hidden, never deleted)"),
     db: Session = Depends(get_db),
     auth: AuthContext = Depends(get_auth_context),
 ):
@@ -104,7 +105,8 @@ def get_appointments(
         teacher_id=teacher_id,
         school_id=school_id,
         appointment_type=appointment_type,
-        status=status
+        status=status,
+        include_archived=include_archived,
     )
     
     if auth.enforce_access and not auth.is_admin:
@@ -250,20 +252,35 @@ def update_appointment(
 @router.delete("/appointments/{appointment_id}")
 def delete_appointment(
     appointment_id: int,
+    reason: Optional[str] = Query(None, description="Why the appointment is being archived"),
     db: Session = Depends(get_db),
     auth: AuthContext = Depends(get_auth_context),
 ):
-    """Delete an appointment"""
+    """Archive an appointment and its therapy session. NOTHING IS DELETED.
+
+    Same verb, same path, same message, and the same two 400s: a completed or
+    in-progress session, or a past appointment with no session, still refuse.
+    Those refusals are about not rewriting work that has already happened, which
+    is as true of archiving as it was of deleting.
+
+    `POST /api/archive/events/{archiveEventId}/restore` puts the pair back.
+    """
     repo = AppointmentRepository(db)
     ensure_appointment_access(db, auth, appointment_id)
-    
+
     try:
-        success = repo.delete_appointment(appointment_id)
-        
-        if not success:
+        event = repo.archive_appointment(
+            appointment_id, user_id=auth.effective_user.id, reason=reason
+        )
+
+        if not event:
             raise HTTPException(status_code=404, detail="Appointment not found")
-        
-        return {"message": "Appointment deleted successfully"}
+
+        return {
+            "message": "Appointment deleted successfully",
+            "archived": True,
+            "archiveEventId": event.id,
+        }
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -281,15 +298,34 @@ def get_appointments_by_series(series_id: str, db: Session = Depends(get_db)):
 
 
 @router.delete("/appointments/series/{series_id}")
-def delete_appointment_series(series_id: str, db: Session = Depends(get_db)):
-    """Delete an entire appointment series"""
+def delete_appointment_series(
+    series_id: str,
+    reason: Optional[str] = Query(None, description="Why the series is being archived"),
+    db: Session = Depends(get_db),
+    auth: AuthContext = Depends(get_auth_context),
+):
+    """Archive the current and future appointments of a series. NOTHING IS DELETED.
+
+    Same verb, same path, same message, and the same selection rule: an
+    appointment whose session is completed or in progress stays, and so does a
+    past appointment with no session.
+
+    The whole series is archived under ONE event, so one restore brings the
+    whole thing back rather than N restores that could be half-finished.
+    """
     repo = AppointmentRepository(db)
-    success = repo.delete_appointment_series(series_id)
-    
-    if not success:
+    event = repo.archive_appointment_series(
+        series_id, user_id=auth.effective_user.id, reason=reason
+    )
+
+    if not event:
         raise HTTPException(status_code=404, detail="Series not found")
-    
-    return {"message": "Appointment series deleted successfully"}
+
+    return {
+        "message": "Appointment series deleted successfully",
+        "archived": True,
+        "archiveEventId": event.id,
+    }
 
 
 @router.put("/appointments/series/{series_id}")
@@ -455,17 +491,19 @@ def get_time_blocks(
     block_type: Optional[str] = Query(None, description="Filter by block type"),
     status: Optional[str] = Query(None, description="Filter by status"),
     available_only: bool = Query(False, description="Show only blocks with available spots"),
+    include_archived: bool = Query(False, description="Include archived rows (archived means hidden, never deleted)"),
     db: Session = Depends(get_db)
 ):
     """Get time blocks within a date range with optional filters"""
     repo = TimeBlockRepository(db)
-    
+
     if available_only:
         time_blocks = repo.get_available_time_blocks(
             start_date=start_date,
             end_date=end_date,
             school_id=school_id,
-            block_type=block_type
+            block_type=block_type,
+            include_archived=include_archived,
         )
     else:
         time_blocks = repo.get_time_blocks_by_date_range(
@@ -474,9 +512,10 @@ def get_time_blocks(
             teacher_id=teacher_id,
             school_id=school_id,
             block_type=block_type,
-            status=status
+            status=status,
+            include_archived=include_archived,
         )
-    
+
     # Convert to summary format
     summaries = []
     for block in time_blocks:
@@ -515,10 +554,12 @@ def get_time_block(
     if not time_block:
         raise HTTPException(status_code=404, detail="Time block not found")
     
+    # `TimeBlock.assigned_students` is the one roster definition, and it drops
+    # archived students -- see the model. Rebuilding it from
+    # `block_assignments` here is how an archived child got back onto a group.
     assigned_students = [
-        _student_summary_for_response(assignment.student, auth)
-        for assignment in time_block.block_assignments
-        if assignment.status == 'assigned'
+        _student_summary_for_response(student, auth)
+        for student in time_block.assigned_students
     ]
     
     return TimeBlockWithStudents(
@@ -742,15 +783,31 @@ def update_time_block_series_pattern(
 
 
 @router.delete("/time-blocks/{time_block_id}")
-def delete_time_block(time_block_id: int, db: Session = Depends(get_db)):
-    """Delete a time block"""
+def delete_time_block(
+    time_block_id: int,
+    reason: Optional[str] = Query(None, description="Why the block is being archived"),
+    db: Session = Depends(get_db),
+    auth: AuthContext = Depends(get_auth_context),
+):
+    """Archive a time block with its appointments and sessions. NOTHING IS DELETED.
+
+    Same verb, same path, same message. The block's STUDENT ASSIGNMENTS are left
+    in place -- they carry no clinical content and keeping them is what lets a
+    restore hand the group back whole. See `app/services/archive.py`.
+    """
     repo = TimeBlockRepository(db)
-    success = repo.delete_time_block(time_block_id)
-    
-    if not success:
+    event = repo.archive_time_block(
+        time_block_id, user_id=auth.effective_user.id, reason=reason
+    )
+
+    if not event:
         raise HTTPException(status_code=404, detail="Time block not found")
-    
-    return {"message": "Time block deleted successfully"}
+
+    return {
+        "message": "Time block deleted successfully",
+        "archived": True,
+        "archiveEventId": event.id,
+    }
 
 
 @router.post("/time-blocks/{time_block_id}/students/{student_id}")
@@ -817,7 +874,7 @@ def get_students_by_teacher_or_case_manager(
                 Student.case_manager_id == teacher_id
             ),
             Student.enrollment_status == 'Active',
-            Student.is_archived == False
+            Student.archived_at.is_(None)
         )
     ).order_by(Student.last, Student.first).all()
     
@@ -930,7 +987,15 @@ def get_time_block_activities(
         assigned_students = []
         if hasattr(activity, 'student_assignments'):
             for assignment in activity.student_assignments:
-                if assignment.status == 'assigned' and assignment.student:
+                # An ARCHIVED student is off this roster.
+                # `activity_student_assignments` has no archive columns (it is a
+                # join row -- see app/services/archive.py), so the child behind
+                # it is filtered where the roster is read.
+                if (
+                    assignment.status == 'assigned'
+                    and assignment.student
+                    and assignment.student.archived_at is None
+                ):
                     first, last = _student_name_parts(assignment.student, auth)
                     assigned_students.append({
                         "id": assignment.student.id,
@@ -1036,7 +1101,15 @@ def update_time_block_activity(
     assigned_students = []
     if hasattr(activity, 'student_assignments'):
         for assignment in activity.student_assignments:
-            if assignment.status == 'assigned' and assignment.student:
+            # An ARCHIVED student is off this roster.
+            # `activity_student_assignments` has no archive columns (it is a
+            # join row -- see app/services/archive.py), so the child behind
+            # it is filtered where the roster is read.
+            if (
+                assignment.status == 'assigned'
+                and assignment.student
+                and assignment.student.archived_at is None
+            ):
                 first, last = _student_name_parts(assignment.student, auth)
                 assigned_students.append({
                     "id": assignment.student.id,
@@ -1248,7 +1321,15 @@ def get_time_block_with_activities(
         assigned_students = []
         if hasattr(activity, 'student_assignments'):
             for assignment in activity.student_assignments:
-                if assignment.status == 'assigned' and assignment.student:
+                # An ARCHIVED student is off this roster.
+                # `activity_student_assignments` has no archive columns (it is a
+                # join row -- see app/services/archive.py), so the child behind
+                # it is filtered where the roster is read.
+                if (
+                    assignment.status == 'assigned'
+                    and assignment.student
+                    and assignment.student.archived_at is None
+                ):
                     first, last = _student_name_parts(assignment.student, auth)
                     assigned_students.append({
                         "id": assignment.student.id,
@@ -1279,10 +1360,12 @@ def get_time_block_with_activities(
         activities.append(activity_dict)
     
     # Get assigned students
+    # `TimeBlock.assigned_students` is the one roster definition, and it drops
+    # archived students -- see the model. Rebuilding it from
+    # `block_assignments` here is how an archived child got back onto a group.
     assigned_students = [
-        _student_summary_for_response(assignment.student, auth)
-        for assignment in time_block.block_assignments
-        if assignment.status == 'assigned'
+        _student_summary_for_response(student, auth)
+        for student in time_block.assigned_students
     ]
     
     # Return as plain dict to avoid Pydantic validation issues

@@ -1,6 +1,6 @@
 from typing import List, Optional, Dict, Any
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import desc, asc, and_, or_
+from sqlalchemy import desc, asc, and_, or_, func
 from datetime import date
 
 from app.models.school import School
@@ -107,10 +107,13 @@ class SchoolRepository:
         if not school:
             return {}
 
-        # Count active students
+        # Count active students. AGGREGATE DECISION: archived students are
+        # excluded -- "how many children does this school have on the caseload"
+        # is a question about the working roster, not about the whole record.
         active_students = self.db.query(Student).filter(
             Student.school_id == school_id,
-            Student.enrollment_status == 'Active'
+            Student.enrollment_status == 'Active',
+            Student.archived_at.is_(None)
         ).count()
 
         # Count active teachers (current assignments)
@@ -122,10 +125,11 @@ class SchoolRepository:
         # Count students by grade level
         grade_distribution = self.db.query(
             Student.grade_level,
-            self.db.func.count(Student.id).label('count')
+            func.count(Student.id).label('count')
         ).filter(
             Student.school_id == school_id,
-            Student.enrollment_status == 'Active'
+            Student.enrollment_status == 'Active',
+            Student.archived_at.is_(None)
         ).group_by(Student.grade_level).all()
 
         return {

@@ -1321,21 +1321,33 @@ def validate(db: Session, batch: ImportBatch) -> dict:
                 blocking_here += 1
             else:
                 uic_first_seen[key] = row.row_index
+            # DELIBERATELY UNFILTERED BY ARCHIVE. `students.uic` is UNIQUE, so
+            # an archived student still owns their UIC and re-creating it would
+            # fail on the constraint -- but the more important reason is
+            # clinical: a child who left the caseload in September and is on
+            # this term's spreadsheet is a RETURNING student, not a new one, and
+            # the therapist needs to be told to restore the record rather than
+            # start a second one beside it.
             existing = (
                 db.query(Student).filter(Student.uic == raw_uic.strip()).one_or_none()
             )
             if existing is not None:
-                record(
-                    row.row_index,
-                    {
-                        "issue": "duplicate_uic_existing",
-                        "field": "uic",
-                        # The alias, which is what a student IS over this
-                        # connection.
-                        "existingStudent": existing.alias,
-                        "existingStudentId": existing.id,
-                    },
-                )
+                issue = {
+                    "issue": "duplicate_uic_existing",
+                    "field": "uic",
+                    # The alias, which is what a student IS over this
+                    # connection.
+                    "existingStudent": existing.alias,
+                    "existingStudentId": existing.id,
+                    "existingStudentArchived": existing.archived_at is not None,
+                }
+                if existing.archived_at is not None:
+                    issue["existingStudentArchiveEventId"] = existing.archive_event_id
+                    issue["hint"] = (
+                        f"{existing.alias} is ARCHIVED, not absent. Restore that "
+                        f"record instead of importing this row as a new student."
+                    )
+                record(row.row_index, issue)
                 blocking_here += 1
 
         row.issues_json = json.dumps(per_row.get(row.row_index, []), ensure_ascii=False)

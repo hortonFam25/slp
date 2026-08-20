@@ -1,9 +1,10 @@
 from sqlalchemy import Column, Integer, String, Date, DateTime, Text, ForeignKey, func
 from sqlalchemy.orm import relationship
 from app.db.base import Base
+from app.models.archive_event import ArchivableMixin
 
 
-class IEPGoal(Base):
+class IEPGoal(ArchivableMixin, Base):
     __tablename__ = "iep_goals"
 
     id = Column(Integer, primary_key=True, index=True)

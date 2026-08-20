@@ -1,3 +1,6 @@
+# First: every archivable table carries an FK into archive_events, so the
+# table has to exist in the metadata before the tables that point at it.
+from app.models.archive_event import ArchivableMixin, ArchiveEvent  # noqa: F401
 from app.models.student import Student  # noqa: F401
 from app.models.service_type import ServiceType  # noqa: F401
 from app.models.goal_category import GoalCategory  # noqa: F401

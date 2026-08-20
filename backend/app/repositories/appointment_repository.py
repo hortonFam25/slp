@@ -8,11 +8,23 @@ from app.models.student import Student
 from app.models.teacher import Teacher
 from app.models.school import School
 from app.schemas.appointment import AppointmentCreate, AppointmentUpdate, RecurringAppointmentCreate
+from app.services import archive as archive_service
 
 logger = logging.getLogger(__name__)
 
 
 class AppointmentRepository:
+    """Appointments, and the therapy sessions that hang off them.
+
+    ARCHIVE FILTERING. Appointments are archivable. Every read path here
+    excludes archived rows unless `include_archived=True` is passed, and that
+    includes the two SCHEDULING predicates -- `check_time_conflict` and
+    `get_available_time_slots`. An archived appointment is one the therapist has
+    taken off the calendar, so it must not go on blocking the slot it used to
+    occupy; leaving it in the conflict check would make an archived appointment
+    strictly worse than a deleted one, which is the opposite of the point.
+    """
+
     def __init__(self, db: Session):
         self.db = db
 
@@ -318,13 +330,22 @@ class AppointmentRepository:
         
         return dates
 
-    def get_appointment(self, appointment_id: int) -> Optional[Appointment]:
-        """Get appointment by ID with related data"""
-        return self.db.query(Appointment).options(
+    def get_appointment(
+        self, appointment_id: int, include_archived: bool = False
+    ) -> Optional[Appointment]:
+        """Get appointment by ID with related data.
+
+        An archived appointment reads as absent by default, which is what turns
+        its id into a 404 -- the answer a caller used to get after a delete.
+        """
+        query = self.db.query(Appointment).options(
             joinedload(Appointment.student),
             joinedload(Appointment.teacher),
             joinedload(Appointment.school)
-        ).filter(Appointment.id == appointment_id).first()
+        ).filter(Appointment.id == appointment_id)
+        if not include_archived:
+            query = query.filter(Appointment.archived_at.is_(None))
+        return query.first()
 
     def update_appointment(self, appointment_id: int, appointment_data: AppointmentUpdate) -> Optional[Appointment]:
         """Update an existing appointment and its linked therapy session, goals, and objectives"""
@@ -334,10 +355,14 @@ class AppointmentRepository:
         from sqlalchemy.orm import joinedload
         from datetime import datetime
         
-        # Get the existing appointment with therapy session data
+        # Get the existing appointment with therapy session data. An archived
+        # appointment is not editable -- restore it first.
         appointment = self.db.query(Appointment).options(
             joinedload(Appointment.therapy_session)
-        ).filter(Appointment.id == appointment_id).first()
+        ).filter(
+            Appointment.id == appointment_id,
+            Appointment.archived_at.is_(None),
+        ).first()
         
         if not appointment:
             return None
@@ -372,9 +397,11 @@ class AppointmentRepository:
         appointment.modified_date = datetime.now()
         self.db.flush()  # Flush to ensure appointment changes are saved
         
-        # Get or create therapy session
+        # Get or create therapy session. An archived one does not count as
+        # existing here: reusing it would drag a retired record back into play.
         therapy_session = self.db.query(TherapySession).filter(
-            TherapySession.appointment_id == appointment.id
+            TherapySession.appointment_id == appointment.id,
+            TherapySession.archived_at.is_(None),
         ).first()
         
         if not therapy_session:
@@ -443,66 +470,61 @@ class AppointmentRepository:
         self.db.refresh(appointment)
         return appointment
 
-    def delete_appointment(self, appointment_id: int) -> bool:
-        """Delete an appointment and its associated therapy session, goals, and objectives"""
-        from app.models.therapy_session import TherapySession
-        from app.models.session_goal import SessionGoal
-        from app.models.session_objective import SessionObjective
-        from sqlalchemy.orm import joinedload
+    def archive_appointment(
+        self, appointment_id: int, user_id: int, reason: Optional[str] = None
+    ) -> Optional["archive_service.ArchiveEvent"]:
+        """Archive an appointment and its therapy session, under one event.
+
+        Replaces `delete_appointment`, which destroyed the pair. The two
+        REFUSALS it made are kept exactly as they were -- a completed or
+        in-progress session, or a past appointment with no session, still raise
+        ValueError and still surface as a 400. They are not about
+        recoverability; they are about not letting the calendar rewrite work
+        that has already happened, and that argument survives the change from
+        delete to archive.
+
+        Session goals and objectives (`session_goals`, `session_objectives`) are
+        NOT touched: they are rows OF the therapy session, they carry no
+        independent meaning, and archiving the session hides them with it. The
+        old code deleted them only because a foreign key made it delete them.
+
+        Returns None when there is no such (active) appointment.
+        """
         from datetime import datetime
-        
-        # Get the appointment with therapy session data
+
         appointment = self.db.query(Appointment).options(
             joinedload(Appointment.therapy_session)
-        ).filter(Appointment.id == appointment_id).first()
-        
+        ).filter(
+            Appointment.id == appointment_id,
+            Appointment.archived_at.is_(None),
+        ).first()
+
         if not appointment:
-            return False
-        
-        # Check if this appointment/therapy session can be deleted
+            return None
+
+        # Check if this appointment/therapy session can be archived
         if appointment.therapy_session:
             session_status = appointment.therapy_session.status
             if session_status in ['completed', 'in_progress']:
                 raise ValueError(f"Cannot delete appointment {appointment_id}: therapy session is {session_status}")
-        
+
         # Secondary check: if no therapy session, check if appointment is in the past
         now = datetime.now()
         if not appointment.therapy_session and appointment.start_datetime < now:
             raise ValueError(f"Cannot delete appointment {appointment_id}: appointment is in the past")
-        
-        logger.info("Deleting appointment %s and associated therapy data", appointment_id)
-        
-        # Get the associated therapy session
-        therapy_session = self.db.query(TherapySession).filter(
-            TherapySession.appointment_id == appointment_id
-        ).first()
-        
-        if therapy_session:
-            # Delete session goals and objectives first (foreign key constraints)
-            deleted_goals = self.db.query(SessionGoal).filter(
-                SessionGoal.therapy_session_id == therapy_session.id
-            ).delete(synchronize_session=False)
-            
-            deleted_objectives = self.db.query(SessionObjective).filter(
-                SessionObjective.therapy_session_id == therapy_session.id
-            ).delete(synchronize_session=False)
-            
-            logger.info(
-                "Deleted %d session goals and %d session objectives",
-                deleted_goals,
-                deleted_objectives,
-            )
-            
-            # Delete the therapy session
-            self.db.delete(therapy_session)
-            logger.info("Deleted therapy session %s", therapy_session.id)
-        
-        # Delete the appointment
-        self.db.delete(appointment)
-        self.db.commit()
-        
-        logger.info("Successfully deleted appointment %s", appointment_id)
-        return True
+
+        logger.info("Archiving appointment %s and its therapy session", appointment_id)
+        event = archive_service.archive(
+            self.db,
+            user_id=user_id,
+            entity_type=archive_service.ENTITY_APPOINTMENT,
+            entity_id=appointment_id,
+            reason=reason,
+        )
+        logger.info(
+            "Archived appointment %s under archive event %s", appointment_id, event.id
+        )
+        return event
 
     def get_appointments_by_date_range(
         self,
@@ -512,7 +534,8 @@ class AppointmentRepository:
         teacher_id: Optional[int] = None,
         school_id: Optional[int] = None,
         appointment_type: Optional[str] = None,
-        status: Optional[str] = None
+        status: Optional[str] = None,
+        include_archived: bool = False,
     ) -> List[Appointment]:
         """Get appointments within a date range with optional filters"""
         query = self.db.query(Appointment).options(
@@ -521,6 +544,9 @@ class AppointmentRepository:
             joinedload(Appointment.school),
             joinedload(Appointment.therapy_session)
         )
+
+        if not include_archived:
+            query = query.filter(Appointment.archived_at.is_(None))
 
         # Date range filter
         start_datetime = datetime.combine(start_date, datetime.min.time())
@@ -550,7 +576,8 @@ class AppointmentRepository:
         self,
         student_id: int,
         start_date: Optional[date] = None,
-        end_date: Optional[date] = None
+        end_date: Optional[date] = None,
+        include_archived: bool = False,
     ) -> List[Appointment]:
         """Get all appointments for a specific student"""
         query = self.db.query(Appointment).options(
@@ -558,6 +585,9 @@ class AppointmentRepository:
             joinedload(Appointment.school),
             joinedload(Appointment.therapy_session)
         ).filter(Appointment.student_id == student_id)
+
+        if not include_archived:
+            query = query.filter(Appointment.archived_at.is_(None))
 
         if start_date and end_date:
             start_datetime = datetime.combine(start_date, datetime.min.time())
@@ -575,13 +605,17 @@ class AppointmentRepository:
         self,
         teacher_id: int,
         start_date: Optional[date] = None,
-        end_date: Optional[date] = None
+        end_date: Optional[date] = None,
+        include_archived: bool = False,
     ) -> List[Appointment]:
         """Get all appointments for a specific teacher"""
         query = self.db.query(Appointment).options(
             joinedload(Appointment.student),
             joinedload(Appointment.school)
         ).filter(Appointment.teacher_id == teacher_id)
+
+        if not include_archived:
+            query = query.filter(Appointment.archived_at.is_(None))
 
         if start_date and end_date:
             start_datetime = datetime.combine(start_date, datetime.min.time())
@@ -602,10 +636,16 @@ class AppointmentRepository:
         end_datetime: datetime,
         exclude_appointment_id: Optional[int] = None
     ) -> bool:
-        """Check if student has conflicting appointments in the time slot"""
+        """Check if student has conflicting appointments in the time slot.
+
+        SCHEDULING DECISION: archived appointments never conflict. See the class
+        docstring -- an appointment taken off the calendar must stop holding its
+        slot, or archiving would be worse than deleting.
+        """
         query = self.db.query(Appointment).filter(
             and_(
                 Appointment.student_id == student_id,
+                Appointment.archived_at.is_(None),
                 Appointment.status.in_(['scheduled', 'in_progress']),
                 or_(
                     # New appointment starts during existing appointment
@@ -648,6 +688,9 @@ class AppointmentRepository:
         existing_appointments = self.db.query(Appointment).filter(
             and_(
                 Appointment.student_id == student_id,
+                # Archived appointments do not occupy a slot. Same reasoning as
+                # check_time_conflict.
+                Appointment.archived_at.is_(None),
                 Appointment.status.in_(['scheduled', 'in_progress']),
                 Appointment.start_datetime >= start_datetime,
                 Appointment.start_datetime <= end_datetime
@@ -678,59 +721,75 @@ class AppointmentRepository:
 
         return available_slots
 
-    def get_appointments_by_series(self, series_id: str) -> List[Appointment]:
+    def get_appointments_by_series(
+        self, series_id: str, include_archived: bool = False
+    ) -> List[Appointment]:
         """Get all appointments that belong to a specific series"""
         from sqlalchemy.orm import joinedload
-        return self.db.query(Appointment).options(
+        query = self.db.query(Appointment).options(
             joinedload(Appointment.therapy_session)
         ).filter(
             Appointment.series_id == series_id
-        ).order_by(Appointment.start_datetime).all()
+        )
+        if not include_archived:
+            query = query.filter(Appointment.archived_at.is_(None))
+        return query.order_by(Appointment.start_datetime).all()
 
-    def delete_appointment_series(self, series_id: str) -> bool:
-        """Delete current and future appointments in a series (not completed or in-progress sessions)"""
-        from app.models.therapy_session import TherapySession
+    def archive_appointment_series(
+        self, series_id: str, user_id: int, reason: Optional[str] = None
+    ) -> Optional["archive_service.ArchiveEvent"]:
+        """Archive the current and future appointments of a series, as ONE event.
+
+        Replaces `delete_appointment_series`, and keeps its selection rule
+        untouched: an appointment whose therapy session is completed or in
+        progress stays, and so does a past appointment with no session. Only the
+        rest are archived.
+
+        One event, not one per appointment: "cancel the rest of this series" is a
+        single decision by a single person, and it has to come back as one too.
+        `archive_many` is what makes that possible -- see
+        `app.services.archive.archive_many`.
+
+        Returns None when the series does not exist or nothing in it is
+        archivable.
+        """
         from datetime import datetime
-        
-        # Get all appointments in the series
+
         appointments = self.get_appointments_by_series(series_id)
         if not appointments:
-            return False
-        
+            return None
+
         now = datetime.now()
-        appointments_to_delete = []
-        sessions_to_delete = []
-        
+        to_archive = []
+
         for appointment in appointments:
-            # Only delete appointments that haven't started yet or are currently scheduled
+            # Only archive appointments that haven't started yet or are currently scheduled
             # Skip completed appointments and in-progress therapy sessions
-            should_delete = True
-            
+            should_archive = True
+
             # Primary check: therapy session status (most important)
             if appointment.therapy_session:
                 session_status = appointment.therapy_session.status
                 if session_status in ['completed', 'in_progress']:
-                    should_delete = False
-            
+                    should_archive = False
+
             # Secondary check: if no therapy session, check if appointment is in the past
             elif appointment.start_datetime < now:
-                should_delete = False
-            
-            if should_delete:
-                appointments_to_delete.append(appointment)
-                if appointment.therapy_session:
-                    sessions_to_delete.append(appointment.therapy_session)
-        
-        # Delete the filtered therapy sessions
-        for session in sessions_to_delete:
-            self.db.delete(session)
-        
-        # Delete the filtered appointments
-        for appointment in appointments_to_delete:
-            self.db.delete(appointment)
-        
-        self.db.commit()
-        return len(appointments_to_delete) > 0
+                should_archive = False
+
+            if should_archive:
+                to_archive.append(appointment.id)
+
+        if not to_archive:
+            return None
+
+        return archive_service.archive_many(
+            self.db,
+            user_id=user_id,
+            entity_type=archive_service.ENTITY_APPOINTMENT,
+            entity_ids=to_archive,
+            reason=reason or f"Appointment series {series_id}",
+        )
 
     def update_appointment_series(self, series_id: str, appointment_data: AppointmentUpdate) -> List[Appointment]:
         """Update current and future appointments in a series (not completed or in-progress sessions)"""

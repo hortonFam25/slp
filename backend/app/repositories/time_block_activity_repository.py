@@ -151,7 +151,9 @@ class TimeBlockActivityRepository:
         appointments = self.db.query(Appointment).filter(
             and_(
                 Appointment.series_id == series_id,
-                Appointment.time_block_id.isnot(None)
+                Appointment.time_block_id.isnot(None),
+                # An archived appointment's block is not part of the live series.
+                Appointment.archived_at.is_(None)
             )
         ).all()
         
@@ -339,7 +341,10 @@ class TimeBlockActivityRepository:
         from app.models.time_block import TimeBlock
         
         # Get the time block to know total duration
-        time_block = self.db.query(TimeBlock).filter(TimeBlock.id == time_block_id).first()
+        time_block = self.db.query(TimeBlock).filter(
+            TimeBlock.id == time_block_id,
+            TimeBlock.archived_at.is_(None),
+        ).first()
         if not time_block:
             return []
         

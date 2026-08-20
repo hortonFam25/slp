@@ -1,3 +1,17 @@
+"""The read side of the AI chat context.
+
+ARCHIVED ROWS ARE EXCLUDED HERE, on every query, the same way
+`app/repositories/` excludes them. These tools do not go through a repository
+-- they query the ORM directly and their output is pasted into a model's
+context window -- so the filter has to be repeated rather than inherited. An
+archived goal reaching this file is an archived goal quoted back to a therapist
+inside a progress note, with nothing on the page saying it was retired.
+
+The one place the filter is deliberately absent is
+`get_prior_saved_progress_notes`: `ai_saved_progress_notes` is not an
+archivable table.
+"""
+
 from __future__ import annotations
 
 from datetime import date, datetime
@@ -21,21 +35,40 @@ def _iso(value: date | datetime | None) -> str | None:
     return value.isoformat() if value else None
 
 
-def build_read_tools(*, db: Session, alias_ctx: StudentAliasContext, user_id: int) -> list[Any]:
-    @function_tool
+def build_read_tool_impls(
+    *, db: Session, alias_ctx: StudentAliasContext, user_id: int
+) -> list[Any]:
+    """The tool bodies as PLAIN functions, before the agents SDK wraps them.
+
+    `function_tool` returns a `FunctionTool` object that does not keep the
+    function it decorated, so a test cannot call the body through it. These
+    read paths feed the AI chat context with a student's clinical record and
+    have to be provable -- notably that they exclude archived rows -- so the
+    bodies are built here and wrapped in `build_read_tools` below.
+    """
     def get_student_year_plan_context() -> dict[str, Any]:
         """
         Return student metadata + annual goals hierarchy for current-year planning context.
         """
         local_db = SessionLocal()
         try:
-            student = local_db.query(Student).filter(Student.id == alias_ctx.student_id).first()
+            student = (
+                local_db.query(Student)
+                .filter(
+                    Student.id == alias_ctx.student_id,
+                    Student.archived_at.is_(None),
+                )
+                .first()
+            )
             if not student:
                 return {"error": "Student not found", "student_alias": alias_ctx.alias}
 
             goals = (
                 local_db.query(IEPGoal)
-                .filter(IEPGoal.student_id == alias_ctx.student_id)
+                .filter(
+                    IEPGoal.student_id == alias_ctx.student_id,
+                    IEPGoal.archived_at.is_(None),
+                )
                 .order_by(IEPGoal.created_date.desc())
                 .all()
             )
@@ -44,7 +77,10 @@ def build_read_tools(*, db: Session, alias_ctx: StudentAliasContext, user_id: in
             for goal in goals:
                 objectives = (
                     local_db.query(GoalObjective)
-                    .filter(GoalObjective.goal_id == goal.id)
+                    .filter(
+                        GoalObjective.goal_id == goal.id,
+                        GoalObjective.archived_at.is_(None),
+                    )
                     .order_by(GoalObjective.objective_number.asc())
                     .all()
                 )
@@ -94,14 +130,20 @@ def build_read_tools(*, db: Session, alias_ctx: StudentAliasContext, user_id: in
         finally:
             local_db.close()
 
-    @function_tool
     def get_student_profile() -> dict[str, Any]:
         """
         Return basic student profile fields for the selected student.
         """
         local_db = SessionLocal()
         try:
-            student = local_db.query(Student).filter(Student.id == alias_ctx.student_id).first()
+            student = (
+                local_db.query(Student)
+                .filter(
+                    Student.id == alias_ctx.student_id,
+                    Student.archived_at.is_(None),
+                )
+                .first()
+            )
             if not student:
                 return {"error": "Student not found", "student_alias": alias_ctx.alias}
 
@@ -118,7 +160,6 @@ def build_read_tools(*, db: Session, alias_ctx: StudentAliasContext, user_id: in
         finally:
             local_db.close()
 
-    @function_tool
     def get_student_goals_and_objectives() -> dict[str, Any]:
         """
         Return annual-goal hierarchy for the selected student.
@@ -127,7 +168,10 @@ def build_read_tools(*, db: Session, alias_ctx: StudentAliasContext, user_id: in
         try:
             goals = (
                 local_db.query(IEPGoal)
-                .filter(IEPGoal.student_id == alias_ctx.student_id)
+                .filter(
+                    IEPGoal.student_id == alias_ctx.student_id,
+                    IEPGoal.archived_at.is_(None),
+                )
                 .order_by(IEPGoal.created_date.desc())
                 .all()
             )
@@ -136,7 +180,10 @@ def build_read_tools(*, db: Session, alias_ctx: StudentAliasContext, user_id: in
             for goal in goals:
                 objectives = (
                     local_db.query(GoalObjective)
-                    .filter(GoalObjective.goal_id == goal.id)
+                    .filter(
+                        GoalObjective.goal_id == goal.id,
+                        GoalObjective.archived_at.is_(None),
+                    )
                     .order_by(GoalObjective.objective_number.asc())
                     .all()
                 )
@@ -179,7 +226,6 @@ def build_read_tools(*, db: Session, alias_ctx: StudentAliasContext, user_id: in
         finally:
             local_db.close()
 
-    @function_tool
     def get_student_therapy_sessions(limit: int = 20) -> dict[str, Any]:
         """
         Return recent therapy sessions with session_objective data.
@@ -193,7 +239,10 @@ def build_read_tools(*, db: Session, alias_ctx: StudentAliasContext, user_id: in
                     selectinload(TherapySession.session_objectives).joinedload(SessionObjective.objective),
                     selectinload(TherapySession.session_objectives).joinedload(SessionObjective.goal),
                 )
-                .filter(TherapySession.student_id == alias_ctx.student_id)
+                .filter(
+                    TherapySession.student_id == alias_ctx.student_id,
+                    TherapySession.archived_at.is_(None),
+                )
                 .order_by(TherapySession.session_date.desc())
                 .limit(bounded_limit)
                 .all()
@@ -252,7 +301,6 @@ def build_read_tools(*, db: Session, alias_ctx: StudentAliasContext, user_id: in
         finally:
             local_db.close()
 
-    @function_tool
     def get_student_therapy_dataset() -> dict[str, Any]:
         """
         Return full therapy dataset for student with session->goal/objective joins.
@@ -272,7 +320,10 @@ def build_read_tools(*, db: Session, alias_ctx: StudentAliasContext, user_id: in
                     .joinedload(SessionObjective.goal)
                     .joinedload(IEPGoal.goal_category),
                 )
-                .filter(TherapySession.student_id == alias_ctx.student_id)
+                .filter(
+                    TherapySession.student_id == alias_ctx.student_id,
+                    TherapySession.archived_at.is_(None),
+                )
                 .order_by(TherapySession.session_date.asc())
                 .all()
             )
@@ -364,7 +415,6 @@ def build_read_tools(*, db: Session, alias_ctx: StudentAliasContext, user_id: in
         finally:
             local_db.close()
 
-    @function_tool
     def get_student_progress_snapshot(limit: int = 50) -> dict[str, Any]:
         """
         Return current therapy objective history from active therapy workflow.
@@ -376,9 +426,15 @@ def build_read_tools(*, db: Session, alias_ctx: StudentAliasContext, user_id: in
                 local_db.query(SessionObjective)
                 .join(TherapySession, SessionObjective.therapy_session_id == TherapySession.id)
                 .options(joinedload(SessionObjective.objective), joinedload(SessionObjective.goal))
+                .join(GoalObjective, SessionObjective.objective_id == GoalObjective.id)
                 .filter(
                     TherapySession.student_id == alias_ctx.student_id,
                     SessionObjective.worked_on == True,
+                    # `session_objectives` has no archive columns of its own;
+                    # a row is hidden when the session it was logged in or the
+                    # objective it was logged against is archived.
+                    TherapySession.archived_at.is_(None),
+                    GoalObjective.archived_at.is_(None),
                 )
                 .order_by(TherapySession.session_date.desc())
                 .limit(bounded_limit)
@@ -419,7 +475,6 @@ def build_read_tools(*, db: Session, alias_ctx: StudentAliasContext, user_id: in
         finally:
             local_db.close()
 
-    @function_tool
     def get_prior_saved_progress_notes(limit: int = 10) -> dict[str, Any]:
         """
         Return prior AI-saved progress notes for this student.
@@ -465,5 +520,12 @@ def build_read_tools(*, db: Session, alias_ctx: StudentAliasContext, user_id: in
         get_student_therapy_dataset,
         get_student_progress_snapshot,
         get_prior_saved_progress_notes,
+    ]
+
+
+def build_read_tools(*, db: Session, alias_ctx: StudentAliasContext, user_id: int) -> list[Any]:
+    return [
+        function_tool(impl)
+        for impl in build_read_tool_impls(db=db, alias_ctx=alias_ctx, user_id=user_id)
     ]
 

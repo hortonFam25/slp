@@ -144,7 +144,12 @@ class TimeBlockActivityRead(TimeBlockActivityBase):
         assigned_students = []
         if hasattr(obj, 'student_assignments'):
             for assignment in obj.student_assignments:
-                if assignment.status == 'assigned' and assignment.student:
+                if (
+                    assignment.status == 'assigned'
+                    and assignment.student
+                    # Archived students are off the roster.
+                    and assignment.student.archived_at is None
+                ):
                     assigned_students.append({
                         "id": assignment.student.id,
                         "first": assignment.student.first,

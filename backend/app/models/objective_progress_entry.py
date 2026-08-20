@@ -1,9 +1,10 @@
 from sqlalchemy import Column, Integer, String, Text, Date, DateTime, ForeignKey, func
 from sqlalchemy.orm import relationship
 from app.db.base import Base
+from app.models.archive_event import ArchivableMixin
 
 
-class ObjectiveProgressEntry(Base):
+class ObjectiveProgressEntry(ArchivableMixin, Base):
     __tablename__ = "objective_progress_entries"
 
     id = Column(Integer, primary_key=True, index=True)

@@ -18,12 +18,22 @@ from app.schemas.scheduling_student import (
 
 
 class SchedulingStudentRepository:
+    """The scheduling screen's view of a student.
+
+    ARCHIVE FILTERING. Archived students are excluded by default -- you cannot
+    schedule a child who is not on the working caseload -- and so are the
+    archived appointments in the per-student summary, so an appointment taken
+    off the calendar stops counting towards `appointment_count` and
+    `has_appointments`.
+    """
+
     def __init__(self, db: Session):
         self.db = db
 
     def get_students_for_scheduling(
-        self, 
-        filters: Optional[StudentScheduleFilters] = None
+        self,
+        filters: Optional[StudentScheduleFilters] = None,
+        include_archived: bool = False,
     ) -> List[StudentScheduleView]:
         """
         Get students with all relationships needed for scheduling
@@ -35,7 +45,10 @@ class SchedulingStudentRepository:
             joinedload(Student.case_manager),
             selectinload(Student.teacher_assignments).joinedload(StudentTeacherAssignment.teacher),
         )
-        
+
+        if not include_archived:
+            query = query.filter(Student.archived_at.is_(None))
+
         # Apply filters
         if filters:
             if filters.school_id:
@@ -115,6 +128,7 @@ class SchedulingStudentRepository:
             appointments = self.db.query(Appointment).filter(
                 and_(
                     Appointment.student_id == student.id,
+                    Appointment.archived_at.is_(None),
                     Appointment.start_datetime >= start_date,
                     Appointment.start_datetime <= end_date
                 )
@@ -150,14 +164,19 @@ class SchedulingStudentRepository:
             has_appointments=len(current_appointments) > 0
         )
 
-    def get_student_for_scheduling(self, student_id: int) -> Optional[StudentScheduleView]:
+    def get_student_for_scheduling(
+        self, student_id: int, include_archived: bool = False
+    ) -> Optional[StudentScheduleView]:
         """Get a single student with scheduling data"""
-        student = self.db.query(Student).options(
+        query = self.db.query(Student).options(
             joinedload(Student.school),
             joinedload(Student.teacher),
             joinedload(Student.case_manager),
             selectinload(Student.teacher_assignments).joinedload(StudentTeacherAssignment.teacher),
-        ).filter(Student.id == student_id).first()
+        ).filter(Student.id == student_id)
+        if not include_archived:
+            query = query.filter(Student.archived_at.is_(None))
+        student = query.first()
         
         if not student:
             return None
