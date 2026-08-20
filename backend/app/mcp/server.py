@@ -1654,7 +1654,10 @@ def get_import_preview(batch_id: int) -> dict:
 
     A sheet with no detectable header row reports its columns by letter with no
     header text at all. That is deliberate: row 1 of a header-less caseload
-    export is a child, not a heading.
+    export is a child, not a heading. It also happens to sheets that DO have a
+    header when the heading is the same shape as the column under it ("First"
+    over "Anna"), because nothing can tell those apart -- ask the therapist what
+    the columns are and map them by letter.
 
     Read the shapes, propose a mapping to the therapist in plain language
     ("column C looks like dates -- is that the IEP date or the annual review?"),
@@ -1698,6 +1701,11 @@ def set_import_mapping(batch_id: int, mapping: dict) -> dict:
     grade or a compliance date. Columns mapped to a name, a date of birth, a
     UIC or notes stay masked forever; asking again will not change that.
 
+    The value has to LOOK like the field as well: a cell that is a date, a long
+    identifier or a paragraph is not shown even from a column mapped to
+    `school`, and `valuesNotShowable` counts how many were held back. A count
+    above zero means the mapping is wrong, not that the tool is being coy.
+
     `value_overrides` is how you fix an unknown school or teacher after
     validate_import reports one:
 
@@ -1729,20 +1737,27 @@ def validate_import(batch_id: int) -> dict:
 
       unparseable_date        row + column + the value's SHAPE
       missing_required        row + which field is missing
+      value_too_long          row + column + the length, never the text
       duplicate_uic_in_file   the PAIR of row numbers, never the identifier
       duplicate_uic_existing  row + the existing student's ALIAS
-      unknown_school          row + column + the value + the closest existing
-      unknown_teacher         match, because school and teacher values are
-      unknown_case_manager    yours to reconcile
-      unknown_eligibility     row + column + the value (warning only)
+      unknown_school          row + column. The VALUE is said once, in
+      unknown_teacher         `unresolvedValues`, not once per student.
+      unknown_case_manager
+      unknown_eligibility     row + column (warning only), grouped the same way
 
-    BLOCKING: missing names, unknown school / teacher / case_manager, and both
-    duplicate-UIC kinds. Everything else is a warning -- an unparseable date is
-    simply left empty on the student.
+    BLOCKING: missing names, over-long values, unknown school / teacher /
+    case_manager, and both duplicate-UIC kinds. Everything else is a warning --
+    an unparseable date is simply left empty on the student.
 
     Resolve unknown schools and teachers with `value_overrides` in
     set_import_mapping, then call this again. `unresolvedValues` groups them for
-    you: one entry per distinct spelling, with the rows it appears on.
+    you: one entry per distinct spelling, with the rows it appears on, capped in
+    length (`unresolvedValuesTruncated` counts what is past the cap).
+
+    An entry that reports `valueShape` instead of `value` is a cell that does
+    not look like a building, an adult or a category -- a birthday or an
+    identifier, say. That means the column is mapped to the wrong field. Fix the
+    mapping; asking again will not print it.
 
     Report the counts to the therapist in plain language. She is the one who
     knows whether "Bldg 4" is Northgate.

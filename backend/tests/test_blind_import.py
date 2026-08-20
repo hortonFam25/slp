@@ -565,7 +565,9 @@ def test_csv_uploads_parse_the_same_way(client, world):
             .all()
         )
         assert [row.row_index for row in rows] == [1, 2, 3]
-        assert rows[0].sheet_name == "caseload"
+        # A constant, NOT the file's name: a filename is user-typed text that
+        # routinely names a child, and the sheet name is returned over MCP.
+        assert rows[0].sheet_name == blind_import.CSV_SHEET_NAME
         # The quoted "Last, First" cell survived as ONE cell.
         assert json.loads(rows[1].cells_json)[0] == f"{A_LAST}, {A_FIRST}"
     finally:
@@ -844,12 +846,18 @@ def test_validation_reports_rows_and_shapes_not_values(call, staged):
     assert date_issue["blocking"] is False
     assert "value" not in date_issue
 
-    # The school IS named, because reconciling it is the agent's job.
+    # The per-row record says WHERE, and carries no value of its own.
     school_issue = next(i for i in outcome["issues"] if i["issue"] == "unknown_school")
-    assert school_issue["value"] == SCHOOL_MISSPELLED
-    assert school_issue["closestExistingMatch"] == SCHOOL_NAME
+    assert school_issue["column"] == "D"
     assert school_issue["blocking"] is True
-    assert outcome["unresolvedValues"]["school"][0]["rows"] == [6]
+    assert "value" not in school_issue
+
+    # The school IS named, because reconciling it is the agent's job -- once,
+    # in the grouped list, rather than once per student.
+    unresolved = outcome["unresolvedValues"]["school"][0]
+    assert unresolved["value"] == SCHOOL_MISSPELLED
+    assert unresolved["closestExistingMatch"] == SCHOOL_NAME
+    assert unresolved["rows"] == [6]
 
 
 def test_a_duplicate_uic_is_reported_as_a_row_pair(call, world):

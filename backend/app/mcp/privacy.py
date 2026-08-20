@@ -863,9 +863,42 @@ HEADER_DIFFERENCE_RATIO = 0.5
 # file.
 HEADER_BODY_SAMPLE_ROWS = 50
 
+# More than this share of a column's populated cells must share one shape class
+# before that column is allowed to VOUCH for the row above it.
+#
+# "This cell is shaped unlike the column below it" is only evidence of a
+# heading when there is a column below it. A sheet laid out sideways -- one
+# student per COLUMN, "Student / DOB / Building" running down the left -- has no
+# columns in that sense: every cell below the first row is a different kind of
+# thing, so every cell of row 1 differs from "its column", and row 1 (which is
+# a list of children's names) qualified as a header row by unanimous vote.
+HEADER_COLUMN_CONSISTENCY = 0.5
+
+# And a column has to have at least this many populated cells below the
+# candidate before its consistency means anything. One cell is always 100%
+# consistent with itself, so a sheet of two rows let row 2 vouch for row 1 on
+# the strength of being one row -- and two children's names differ in structure
+# often enough ("Van Der Berg, Anna" against "Smith, Bob") for that to be a
+# reveal. Two cells is the least that can disagree.
+HEADER_COLUMN_MIN_SAMPLE = 2
+
+# Beyond this many characters a mapped value is not quoted verbatim however it
+# was mapped. A building and an adult have short names; a cell longer than this
+# is a sentence, and a sentence in a caseload export is about a child.
+REVEAL_VALUE_MAX_LENGTH = 60
+
+# How many digits a value with no letters in it may carry and still be quoted.
+# "12" is a grade. "4820193746" is a state identifier.
+REVEAL_MAX_BARE_DIGITS = 3
+
 # A year, or a date. Either one in a cell means it is data, not a label.
 _YEAR = re.compile(r"\d{4}")
 _DATE_ISH = re.compile(r"\d{1,4}[-/.]\d{1,2}[-/.]\d{1,4}")
+
+# A month NAME, bounded on both sides so "March" matches and "Marshall" does
+# not. A month word next to a digit is a date in the one spelling `_DATE_ISH`
+# and `_YEAR` between them cannot see: "9-May-13".
+_MONTH_WORD = re.compile(r"\b(?:" + _MONTHS + r")\b", re.IGNORECASE)
 
 
 def mask_value(value: Any) -> Optional[str]:
@@ -1028,6 +1061,13 @@ def looks_like_label(value: Any) -> bool:
     * a date-shaped run -- "3/17/11" has no four-digit year and would otherwise
       sail through.
 
+    * a comma or an apostrophe -- the punctuation of a PERSON. "Ramirez,
+      Sofia" and "O'Brien" are the two commonest spellings of a name in a
+      district export, and no column heading has ever needed either. This is
+      the cheapest gate here and the highest-precision one: it does not ask
+      whether a cell looks like a name in general, only whether it is punctuated
+      the way names are and headings are not.
+
     Plus the obvious floor: a cell with no letters at all is not a heading, and
     a cell with more digits than letters is data wearing a word.
     """
@@ -1038,22 +1078,62 @@ def looks_like_label(value: Any) -> bool:
         return False
     if _YEAR.search(text) or _DATE_ISH.search(text):
         return False
+    if "," in text or "'" in text or "’" in text:
+        return False
     letters = sum(1 for char in text if char.isalpha())
     if letters == 0:
         return False
     return sum(1 for char in text if char.isdigit()) <= letters
 
 
-def _modal_shape(values: Iterable[Any]) -> Optional[str]:
+def shape_class(value: Any) -> Optional[str]:
+    """
+    A cell -> its shape with every run collapsed. "Ramirez, Sofia" -> "Xx, Xx".
+
+    The difference from `mask_value` is LENGTH, and it is the whole point.
+    Two surnames are the same KIND of thing and different lengths, so their
+    exact shapes differ -- which meant a first data row could be declared
+    "shaped unlike the column beneath it" purely by being a different number of
+    letters from the row under it, which is the one thing a data row always is.
+
+    Collapsing runs asks the question that was meant: is this cell the same
+    kind of thing as the column below it? "Xxxxxxx" (a heading) and
+    "Xxxxxxx, Xxxxx" (a name) are different kinds. "Xxxxxxxxxxxx, Xxxxx" and
+    "Xxxx, Xxxxxxx" are the same kind in two sizes.
+    """
+    shape = mask_value(value)
+    if shape is None:
+        return None
+    out: list[str] = []
+    for char in shape:
+        if out and out[-1] == char:
+            continue
+        out.append(char)
+    return "".join(out)
+
+
+def _consistent_shape_class(values: Iterable[Any]) -> Optional[str]:
+    """
+    The shape class this column is made of, or None if it is not made of one.
+
+    None means two different things to the caller and both are "no evidence":
+    the column is empty, or the column is a jumble. A jumble is not a column and
+    cannot testify about the row above it -- see `HEADER_COLUMN_CONSISTENCY`.
+    """
     counts: dict[str, int] = {}
+    total = 0
     for value in values:
-        shape = mask_value(value)
+        shape = shape_class(value)
         if shape is None:
             continue
+        total += 1
         counts[shape] = counts.get(shape, 0) + 1
-    if not counts:
+    if total < HEADER_COLUMN_MIN_SAMPLE:
         return None
-    return max(counts.items(), key=lambda item: (item[1], item[0]))[0]
+    modal, seen = max(counts.items(), key=lambda item: (item[1], item[0]))
+    if seen <= HEADER_COLUMN_CONSISTENCY * total:
+        return None
+    return modal
 
 
 def _differs_from_the_column(cells: Sequence[Any], below: Sequence[Sequence[Any]]) -> bool:
@@ -1067,9 +1147,13 @@ def _differs_from_the_column(cells: Sequence[Any], below: Sequence[Sequence[Any]
 
     A real heading does not look like its own column -- "Student" over a column
     of "Xxxxxxx, Xxxxx", "DOB" over a column of "##/##/####". A first data row
-    looks exactly like its column, because it IS one. So the shape of each
-    populated cell is compared with the commonest shape in that column below,
+    looks exactly like its column, because it IS one. So the shape CLASS of each
+    populated cell is compared with the commonest class in that column below,
     and a majority have to differ.
+
+    Class, not shape: see `shape_class`. Comparing exact shapes made "a name
+    four letters longer than the name below it" count as a difference, so a
+    two-row header-less sheet printed its first child as a heading.
 
     A row with nothing under it never qualifies. There is no column to be unlike,
     and a one-row sheet has no students to import anyway.
@@ -1081,18 +1165,46 @@ def _differs_from_the_column(cells: Sequence[Any], below: Sequence[Sequence[Any]
     populated = 0
     different = 0
     for index, cell in enumerate(cells):
-        shape = mask_value(cell)
+        shape = shape_class(cell)
         if shape is None:
             continue
         populated += 1
-        modal = _modal_shape(
+        modal = _consistent_shape_class(
             row[index] if index < len(row) else None for row in sample
         )
-        if modal is None or modal != shape:
+        # No column below, or no consistent one: no evidence either way, and
+        # "no evidence" must not read as "differs". Counting it as a difference
+        # is what let a sideways sheet nominate its first row -- a row of
+        # children -- as the header.
+        if modal is not None and modal != shape:
             different += 1
     if populated == 0:
         return False
     return different > HEADER_DIFFERENCE_RATIO * populated
+
+
+def _typical_width(parsed: Sequence[tuple[int, Sequence[Any]]]) -> int:
+    """
+    How many cells a row of this sheet USUALLY fills.
+
+    Not the widest row: a single "prepared by the district data team" line under
+    a four-column table made the widest row six, so the real header row never
+    counted as full-width, the header scan never stopped, and the rows below it
+    -- children -- were considered as headings in their own right.
+
+    Ties break toward the narrower count, because this number only decides when
+    the scan STOPS. Stopping too early costs a header nobody gets to read;
+    stopping too late costs a child.
+    """
+    counts: dict[int, int] = {}
+    for _, cells in parsed:
+        populated = sum(1 for cell in cells if mask_value(cell) is not None)
+        if populated:
+            counts[populated] = counts.get(populated, 0) + 1
+    if not counts:
+        return 0
+    most = max(counts.values())
+    return min(width for width, seen in counts.items() if seen == most)
 
 
 def header_reveal_rows(
@@ -1128,7 +1240,7 @@ def header_reveal_rows(
     rows = list(parsed[:HEADER_SCAN_ROWS])
     if not rows:
         return []
-    width = max((len(cells) for _, cells in parsed), default=0)
+    width = _typical_width(parsed)
 
     out: list[int] = []
     for position, (row_index, cells) in enumerate(rows):
@@ -1151,6 +1263,46 @@ def header_reveal_rows(
     return out
 
 
+def revealable_value(value: Any) -> bool:
+    """
+    May this CELL be quoted verbatim, whatever a mapping claims it is?
+
+    The allow-list in `SAFE_REVEAL_FIELDS` gates on the FIELD, and a field is
+    whatever the caller said it was. That is fine against a mistake and useless
+    against a lie, and the caller here is a model that may be doing what the
+    conversation told it to rather than what the therapist asked for. So a
+    second gate sits on the value itself, and it is the one that cannot be
+    talked around: a date, a long identifier or a paragraph is never printed,
+    even from a column somebody has labelled `school`.
+
+    What survives is what an organisational value actually looks like:
+    "Northgate Elementary", "Marla Pennington", "SLI", "Bldg 4", "K", "12".
+    What does not: "2013-05-09", "3/17/2011", "9-May-13", "4820193746", and
+    anything longer than a name.
+
+    This does NOT make a mislabelled name column safe -- a surname is a short
+    letter-only word and no test can tell it from a small school's name. That
+    residual is why `validate` refuses to write anything it cannot resolve, and
+    why the quoted list is capped. What this closes is the two categories the
+    tools promise unconditionally: birthdays and identifiers.
+    """
+    if value is None:
+        return False
+    text = (value if isinstance(value, str) else str(value)).strip()
+    if not text or len(text) > REVEAL_VALUE_MAX_LENGTH:
+        return False
+    # A four-digit run is a year or an identifier; a date shape is a date.
+    if _YEAR.search(text) or _DATE_ISH.search(text):
+        return False
+    digits = sum(1 for char in text if char.isdigit())
+    letters = sum(1 for char in text if char.isalpha())
+    if digits and _MONTH_WORD.search(text):
+        return False
+    if letters == 0:
+        return 0 < digits <= REVEAL_MAX_BARE_DIGITS
+    return digits <= letters or digits <= REVEAL_MAX_BARE_DIGITS
+
+
 def reveal_samples(
     values: Sequence[Any],
     contexts: Sequence[StudentAliasContext],
@@ -1161,10 +1313,10 @@ def reveal_samples(
 
     Two gates have already been passed before this is called: the column was
     mapped by a deliberate decision, and the field it was mapped to is in
-    `SAFE_REVEAL_FIELDS`. This adds the third, which is the one the allow-list
-    cannot cover: a school or teacher cell that happens to contain an EXISTING
-    student's name goes through the same roster scrub every other string on
-    this server does, and comes out as that student's alias.
+    `SAFE_REVEAL_FIELDS`. This adds two more: `revealable_value`, which asks
+    whether the cell looks like the KIND of thing the allow-list is for, and
+    the roster scrub -- a school or teacher cell that happens to contain an
+    EXISTING student's name comes out as that student's alias.
 
     Order is first-seen, so the samples read like the top of the column rather
     than like a shuffled set.
@@ -1179,6 +1331,8 @@ def reveal_samples(
         if key in seen:
             continue
         seen.add(key)
+        if not revealable_value(text):
+            continue
         out.append(scrub_text(text, contexts))
         if len(out) >= limit:
             break

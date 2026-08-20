@@ -66,6 +66,7 @@ import difflib
 import hashlib
 import io
 import json
+import logging
 import re
 import secrets
 from datetime import date, datetime, timedelta
@@ -81,6 +82,7 @@ from app.mcp.privacy import (
     mask_header,
     mask_value,
     reveal_samples,
+    revealable_value,
     summarize_column,
 )
 from app.models.eligibility_category import EligibilityCategory
@@ -101,6 +103,8 @@ from app.models.user_student_access import UserStudentAccess
 from app.repositories.student_repository import StudentRepository
 from app.schemas.student import StudentCreate
 
+logger = logging.getLogger(__name__)
+
 # ---------------------------------------------------------------------------
 # policy constants
 # ---------------------------------------------------------------------------
@@ -118,6 +122,21 @@ UPLOAD_TOKEN_TTL = timedelta(minutes=30)
 MAX_UPLOAD_BYTES = 5 * 1024 * 1024
 MAX_DATA_ROWS = 5000
 
+# The longest a single cell may be before it is truncated at parse time. Five
+# compressed megabytes of xlsx can hold a single cell of several hundred
+# megabytes -- zip is very good at repetition -- and `MAX_DATA_ROWS` does not
+# bound that, because it counts rows. Nothing an import writes is longer than a
+# school's name, so anything past this is not caseload data.
+MAX_CELL_CHARS = 4096
+
+# What a CSV's one sheet is called. NOT the file's name: the upload route takes
+# a filename from a browser, "Ramirez caseload.csv" is a child's name, and the
+# sheet name is returned over MCP by `preview` and echoed by every mapping
+# error that lists a file's sheets. An xlsx carries its own sheet names, which
+# the therapist typed inside the workbook; a CSV has none, and inventing one out
+# of the filename was the only path by which the filename crossed the wire.
+CSV_SHEET_NAME = "Sheet1"
+
 # A guard, not a limit anybody will meet: a sheet with more columns than this
 # is not a caseload and parsing all of it would be a way to make the server
 # work hard on request.
@@ -128,6 +147,34 @@ MAX_COLUMNS = 512
 # whole file, so nothing is hidden -- what is capped is the size of the payload
 # a model has to read.
 MAX_LISTED_ISSUES = 200
+
+# How many DISTINCT unresolved spellings `validate` quotes per field before it
+# stops listing them and reports a count instead.
+#
+# This is a volume gate, not a privacy one -- the privacy gate is
+# `privacy.revealable_value`. It exists because the grouped list used to be
+# uncapped: a column mislabelled `school` came back as every distinct value in
+# it, deduplicated and sorted, which is a roster export in one tool call. A
+# caseload does not span more buildings than this, so a file that does is a
+# mapping that is wrong, and the count says so without printing the column.
+UNRESOLVED_LIST_LIMIT = 25
+
+# The length limits `app/schemas/student.py` puts on the fields this import
+# writes. Checked HERE so an over-long cell is a validation issue with a row
+# number on it, rather than a pydantic `ValidationError` raised in the middle
+# of the commit loop -- whose message quotes the offending value back to the
+# model, which for `first_name` is precisely the thing that must never travel.
+#
+# `test_blind_import_adversarial.py` asserts this table still agrees with the
+# schema, so a limit changed there fails a test here rather than reopening the
+# hole quietly.
+MAX_IMPORTABLE_VALUE_LENGTH = {
+    "first_name": 100,
+    "last_name": 100,
+    "uic": 50,
+    "grade_level": 35,
+    "enrollment_status": 20,
+}
 
 # The encodings a district export actually arrives in, tried in order. Same
 # list the rigid CSV importer uses.
@@ -147,6 +194,7 @@ BLOCKING_ISSUES = frozenset(
         "unknown_case_manager",
         "duplicate_uic_in_file",
         "duplicate_uic_existing",
+        "value_too_long",
         "no_data_rows",
     }
 )
@@ -307,6 +355,8 @@ def _cell_text(value: Any) -> Optional[str]:
             return str(int(value))
         return repr(value)
     text = str(value).strip()
+    if len(text) > MAX_CELL_CHARS:
+        text = text[:MAX_CELL_CHARS]
     return text or None
 
 
@@ -327,7 +377,7 @@ def parse_upload(filename: str, content: bytes) -> list[dict]:
     name = (filename or "").strip()
     lowered = name.lower()
     if lowered.endswith(".csv"):
-        sheets = _parse_csv(name, content)
+        sheets = _parse_csv(content)
     elif lowered.endswith(".xlsx"):
         sheets = _parse_xlsx(content)
     elif lowered.endswith(".xls"):
@@ -347,12 +397,22 @@ def parse_upload(filename: str, content: bytes) -> list[dict]:
             "That file has no rows in it. Check that you uploaded the right "
             "file and that it is not empty."
         )
-    if total > MAX_DATA_ROWS:
-        raise UploadRejected(
-            f"That file has {total} rows, which is more than the {MAX_DATA_ROWS} "
-            f"this import accepts. Split it and upload the parts separately."
-        )
     return sheets
+
+
+def _too_many_rows() -> UploadRejected:
+    """
+    The refusal both parsers raise the moment the row budget is spent.
+
+    Raised from INSIDE the read loop rather than counted afterwards: a workbook
+    of a thousand tabs holding ten rows each is ten thousand rows, and reading
+    all of them into memory before objecting to their number is a way to be
+    made to do a lot of work by a five-megabyte file.
+    """
+    return UploadRejected(
+        f"That file has more than the {MAX_DATA_ROWS} rows this import accepts, "
+        f"counting every sheet in it. Split it and upload the parts separately."
+    )
 
 
 def _parse_xlsx(content: bytes) -> list[dict]:
@@ -389,6 +449,7 @@ def _parse_xlsx(content: bytes) -> list[dict]:
         ) from exc
 
     sheets: list[dict] = []
+    budget = MAX_DATA_ROWS
     try:
         for worksheet in workbook.worksheets:
             rows: list[tuple[int, list[Optional[str]]]] = []
@@ -396,6 +457,9 @@ def _parse_xlsx(content: bytes) -> list[dict]:
                 cells = _trim([_cell_text(value) for value in raw[:MAX_COLUMNS]])
                 if not cells:
                     continue
+                if budget <= 0:
+                    raise _too_many_rows()
+                budget -= 1
                 rows.append((index, cells))
             sheets.append({"name": worksheet.title, "rows": rows})
     finally:
@@ -415,18 +479,29 @@ def _decode(content: bytes) -> str:
     )
 
 
-def _parse_csv(filename: str, content: bytes) -> list[dict]:
-    """A CSV is one sheet, named after the file it came in."""
+def _parse_csv(content: bytes) -> list[dict]:
+    """A CSV is one sheet, and its name is a constant -- see `CSV_SHEET_NAME`."""
     text = _decode(content)
-    stem = re.sub(r"\.csv$", "", filename, flags=re.IGNORECASE).strip() or "Sheet1"
     rows: list[tuple[int, list[Optional[str]]]] = []
     reader = csv.reader(io.StringIO(text, newline=""))
-    for index, raw in enumerate(reader, start=1):
-        cells = _trim([_cell_text(value) for value in raw[:MAX_COLUMNS]])
-        if not cells:
-            continue
-        rows.append((index, cells))
-    return [{"name": stem[:255], "rows": rows}]
+    try:
+        for index, raw in enumerate(reader, start=1):
+            cells = _trim([_cell_text(value) for value in raw[:MAX_COLUMNS]])
+            if not cells:
+                continue
+            if len(rows) >= MAX_DATA_ROWS:
+                raise _too_many_rows()
+            rows.append((index, cells))
+    except csv.Error as exc:
+        # An unterminated quote turns the rest of the file into one field, and
+        # `csv` refuses past 128 KB. Its message is about the file, so it is not
+        # repeated to anybody.
+        raise UploadRejected(
+            "That CSV could not be read -- a quotation mark is probably left "
+            "open somewhere in it. Re-save it from Excel or Sheets and upload "
+            "it again."
+        ) from exc
+    return [{"name": CSV_SHEET_NAME, "rows": rows}]
 
 
 def store_rows(
@@ -849,14 +924,20 @@ def set_mapping(db: Session, batch: ImportBatch, mapping: Any, contexts) -> dict
         index = _column_index(letter)
         values = [cells[index] if index < len(cells) else None for cells in parsed]
         if field in SAFE_REVEAL_FIELDS and field not in NEVER_REVEAL_FIELDS:
+            populated = [value for value in values if mask_value(value) is not None]
+            unrevealable = sum(
+                1 for value in populated if not revealable_value(value)
+            )
             revealed[letter] = {
                 "field": field,
                 "sampleValues": reveal_samples(values, contexts),
-                "distinctValues": len({
-                    (value or "").strip().casefold()
-                    for value in values
-                    if mask_value(value) is not None
-                }),
+                "distinctValues": len(
+                    {(value or "").strip().casefold() for value in populated}
+                ),
+                # Cells in an allow-listed column that still may not be quoted
+                # -- dates, long identifiers, prose. A count above zero means
+                # the column is not what the mapping says it is.
+                "valuesNotShowable": unrevealable,
             }
         else:
             withheld[letter] = field
@@ -1030,16 +1111,79 @@ def _apply_override(mapping: dict, field: str, value: str) -> str:
     return mapping.get("value_overrides", {}).get(field, {}).get(value.casefold(), value)
 
 
+# The fields whose unresolved values are GROUPED and (subject to
+# `revealable_value`) quoted. The lookup three are blocking; eligibility is a
+# warning, which is why it needs the same grouping -- an ungrouped warning that
+# quotes a value once per row is an uncapped channel wearing a small name.
+_REPORTABLE_VALUE_FIELDS = _LOOKUP_FIELDS + ("eligibility",)
+
+
+def _group(
+    bucket: dict, value: str, row_index: int, lookups: "_Lookups", field: str
+) -> None:
+    """Add one unresolvable cell to its field's grouped list, once per spelling."""
+    entry = bucket.get(value.casefold())
+    if entry is None:
+        entry = {"rows": [], "_sort": value.casefold()}
+        entry.update(_reported_value(value))
+        # A "did you mean" is only meaningful next to the value it is a
+        # suggestion for, and only the database's own names are ever in it.
+        if "value" in entry:
+            entry["closestExistingMatch"] = lookups.closest(value, field)
+        bucket[value.casefold()] = entry
+    entry["rows"].append(row_index)
+
+
+def _over_length(field: str, value: Optional[str]) -> bool:
+    limit = MAX_IMPORTABLE_VALUE_LENGTH.get(field)
+    return bool(limit) and value is not None and len(value) > limit
+
+
+def _length_issue(field: str, value: str, fields: dict) -> dict:
+    """A cell the student schema will refuse -- by length, never by content."""
+    found = fields.get(field)
+    issue = {
+        "issue": "value_too_long",
+        "field": field,
+        "length": len(value),
+        "maximum": MAX_IMPORTABLE_VALUE_LENGTH[field],
+    }
+    if found:
+        issue["column"] = found[0]
+    return issue
+
+
+def _reported_value(value: str) -> dict:
+    """
+    One unresolvable cell -> what may be said about it.
+
+    The value itself when it looks like the kind of thing its field is for, and
+    its SHAPE when it does not. A column of birthdays labelled `school` is
+    reported as "row 7, column D, shape ####-##-##", which is exactly what an
+    unparseable date is reported as and exactly as much as anybody needs to
+    notice that the mapping is wrong.
+    """
+    if revealable_value(value):
+        return {"value": value}
+    return {"valueShape": mask_value(value)}
+
+
 def validate(db: Session, batch: ImportBatch) -> dict:
     """
     Every row checked, and every problem reported WITHOUT the value that caused it.
 
     The discipline is uniform: a row number always; a column letter always; the
-    VALUE only when the field it came from is on the reveal allow-list. So an
-    unparseable birthday is reported as "row 14, column D, shape ##-##-##",
-    which is enough to fix it and useless to anyone else, while an unknown
-    school is reported by name, because a name the agent cannot see is a name
-    the agent cannot reconcile.
+    VALUE never, in the per-row record. So an unparseable birthday is reported
+    as "row 14, column D, shape ##-##-##", which is enough to fix it and
+    useless to anyone else.
+
+    An unknown school is still reported by name, because a name the agent
+    cannot see is a name the agent cannot reconcile -- but ONCE, in the grouped
+    `unresolvedValues`, and subject to two gates the per-row record could not
+    apply: `revealable_value` (is this cell shaped like a building at all, or is
+    it a birthday in a column somebody has labelled `school`?) and
+    `UNRESOLVED_LIST_LIMIT` (a caseload does not span twenty-five buildings, so
+    a file that does is a mapping that is wrong).
 
     A duplicate against an existing student is reported as that student's ALIAS.
     """
@@ -1062,7 +1206,9 @@ def validate(db: Session, batch: ImportBatch) -> dict:
     issues: list[dict] = []
     per_row: dict[int, list[dict]] = {}
     uic_first_seen: dict[str, int] = {}
-    unresolved: dict[str, dict[str, dict]] = {field: {} for field in _LOOKUP_FIELDS}
+    unresolved: dict[str, dict[str, dict]] = {
+        field: {} for field in _REPORTABLE_VALUE_FIELDS
+    }
     ready = 0
 
     def record(row_index: int, payload: dict) -> None:
@@ -1087,6 +1233,16 @@ def validate(db: Session, batch: ImportBatch) -> dict:
         for label, value in (("first_name", first), ("last_name", last)):
             if not value:
                 record(row.row_index, {"issue": "missing_required", "field": label})
+                blocking_here += 1
+            elif _over_length(label, value):
+                record(
+                    row.row_index,
+                    _length_issue(label, value, fields),
+                )
+                blocking_here += 1
+        for label in ("uic", "grade_level", "enrollment_status"):
+            if label in fields and _over_length(label, fields[label][1]):
+                record(row.row_index, _length_issue(label, fields[label][1], fields))
                 blocking_here += 1
 
         # ---- dates -------------------------------------------------------
@@ -1122,25 +1278,15 @@ def validate(db: Session, batch: ImportBatch) -> dict:
             if found is not None:
                 continue
             kind = f"unknown_{field}" if field != "case_manager" else "unknown_case_manager"
-            closest = lookups.closest(value, field)
+            # The per-ROW record says where the problem is; the value is said
+            # ONCE, in the grouped list below. Repeating it per row turned a
+            # deduplicated list of a handful of buildings into one quoted cell
+            # per student, which is a column export with a row number attached.
             record(
                 row.row_index,
-                {
-                    "issue": kind,
-                    "field": field,
-                    "column": letter,
-                    # Allow-listed, so the value itself is reportable. This is
-                    # the ONE place a raw cell is quoted, and it is what makes
-                    # the problem fixable.
-                    "value": value,
-                    "closestExistingMatch": closest,
-                },
+                {"issue": kind, "field": field, "column": letter},
             )
-            bucket = unresolved[field].setdefault(
-                value.casefold(),
-                {"value": value, "closestExistingMatch": closest, "rows": []},
-            )
-            bucket["rows"].append(row.row_index)
+            _group(unresolved[field], value, row.row_index, lookups, field)
             blocking_here += 1
 
         # ---- eligibility (validated, not written) ------------------------
@@ -1153,10 +1299,9 @@ def validate(db: Session, batch: ImportBatch) -> dict:
                         "issue": "unknown_eligibility",
                         "field": "eligibility",
                         "column": letter,
-                        "value": raw,
-                        "closestExistingMatch": lookups.closest(raw, "eligibility"),
                     },
                 )
+                _group(unresolved["eligibility"], raw, row.row_index, lookups, "eligibility")
 
         # ---- UIC ---------------------------------------------------------
         if "uic" in fields:
@@ -1209,6 +1354,8 @@ def validate(db: Session, batch: ImportBatch) -> dict:
     batch.updated_at = datetime.utcnow()
     db.commit()
 
+    listed = {field: _listed(bucket) for field, bucket in unresolved.items()}
+
     return {
         "batchId": batch.id,
         "status": batch.status,
@@ -1221,18 +1368,34 @@ def validate(db: Session, batch: ImportBatch) -> dict:
         "issues": issues[:MAX_LISTED_ISSUES],
         "issuesTruncated": len(issues) > MAX_LISTED_ISSUES,
         "unresolvedValues": {
-            field: sorted(bucket.values(), key=lambda item: item["value"])
-            for field, bucket in unresolved.items()
-            if bucket
+            field: listed[field] for field in unresolved if unresolved[field]
+        },
+        "unresolvedValuesTruncated": {
+            field: len(unresolved[field]) - len(listed[field])
+            for field in unresolved
+            if len(unresolved[field]) > len(listed[field])
         },
         "howToResolve": (
             "Unknown school / teacher / case_manager values are the blocking "
             "ones. Call list_schools and list_teachers, then call "
             "set_import_mapping again with value_overrides mapping the file's "
             "spelling onto the existing name. This import never creates a "
-            "school or a teacher."
+            "school or a teacher. An entry reported as `valueShape` rather than "
+            "`value` is a cell that does not look like a building, an adult or "
+            "a category at all -- a birthday or an identifier, say -- which "
+            "means the column is mapped to the wrong field. Fix the mapping; "
+            "the value will not be shown."
         ),
     }
+
+
+def _listed(bucket: dict) -> list[dict]:
+    """One field's grouped unresolved values, sorted and capped."""
+    ordered = sorted(bucket.values(), key=lambda item: item["_sort"])
+    return [
+        {key: value for key, value in entry.items() if key != "_sort"}
+        for entry in ordered[:UNRESOLVED_LIST_LIMIT]
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -1358,8 +1521,10 @@ def commit(db: Session, batch: ImportBatch, user_id: int, confirm: bool) -> dict
     repository = StudentRepository(db)
     created: list[int] = []
     grants: list[int] = []
+    failed_row: Optional[int] = None
     try:
         for row, fields in payloads:
+            failed_row = row.row_index
             student = repository.create_student(_student_payload(fields, mapping, lookups))
             created.append(student.id)
             row.resolved_student_id = student.id
@@ -1383,9 +1548,35 @@ def commit(db: Session, batch: ImportBatch, user_id: int, confirm: bool) -> dict
         batch.upload_token_hash = None
         db.commit()
     except Exception:
+        # The message is NOT re-raised. Whatever failed had a row of the
+        # spreadsheet in its hands: pydantic quotes the offending cell back as
+        # `input_value=...` and a driver quotes the whole parameter tuple, so
+        # the exception text of a failed student INSERT is a child's name, date
+        # of birth and identifier in one string, heading for a transcript. The
+        # row number is what makes it fixable and is all that goes out.
+        logger.exception(
+            "Blind import commit failed for batch %s at row %s", batch.id, failed_row
+        )
         db.rollback()
-        _undo(db, created, grants)
-        raise
+        try:
+            _undo(db, created, grants)
+        except Exception:
+            logger.exception("Blind import undo failed for batch %s", batch.id)
+            raise BlindImportError(
+                f"Row {failed_row} of sheet {mapping['sheet']!r} could not be "
+                f"written, and undoing the {len(created)} student(s) already "
+                f"created failed as well. Do not retry this import. Tell the "
+                f"therapist to check her caseload in the SLP Pro app and say "
+                f"that the import was interrupted."
+            ) from None
+        raise BlindImportError(
+            f"Row {failed_row} of sheet {mapping['sheet']!r} could not be written, "
+            f"so nothing was: the {len(created)} student(s) this call had already "
+            f"created have been removed again. The row's values are not repeated "
+            f"here. Check that row in the spreadsheet -- a cell far longer than "
+            f"the field it is mapped to is the usual cause -- and run "
+            f"validate_import again."
+        ) from None
 
     return {
         "committed": True,
@@ -1421,6 +1612,14 @@ def _undo(db: Session, student_ids: Sequence[int], grant_ids: Sequence[int]) -> 
                 UserStudentAccess.id.in_(list(grant_ids))
             ).delete(synchronize_session=False)
         if student_ids:
+            # The staged rows point at the students this call created, and
+            # `import_rows.resolved_student_id` is a real foreign key. Deleting
+            # the students without clearing it first fails on the constraint --
+            # which is how a compensating delete came to leave behind exactly
+            # the half-imported caseload it exists to prevent.
+            db.query(ImportRow).filter(
+                ImportRow.resolved_student_id.in_(list(student_ids))
+            ).update({"resolved_student_id": None}, synchronize_session=False)
             db.query(Student).filter(Student.id.in_(list(student_ids))).delete(
                 synchronize_session=False
             )
