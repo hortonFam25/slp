@@ -24,16 +24,23 @@ back, what the ids mean, and which tool to pair it with.
 
 from __future__ import annotations
 
+import functools
 import logging
 from datetime import date, datetime, timedelta
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from sqlalchemy.orm import Session
 
+from app.ai.privacy import StudentAliasContext
 from app.db.database import SessionLocal
 from app.mcp.auth import McpPrincipal, current_principal
+from app.mcp.privacy import (
+    build_contexts,
+    sanitize_error_message,
+    sanitize_tool_result,
+)
 from app.models.goal_objective import GoalObjective
 from app.models.iep_goal import IEPGoal
 from app.models.objective_progress_entry import ObjectiveProgressEntry
@@ -92,6 +99,20 @@ therapist is allowed to see. There is no therapist parameter anywhere and no id
 you can pass that reaches somebody else's caseload — a student outside it comes
 back as "not found or not on your caseload", not as data.
 
+STUDENTS ARE IDENTIFIED BY ALIAS, NEVER BY NAME. Every student appears as a
+numeric id and an alias of the form "student_12", and that alias IS the
+student's identity for the whole of this connection — use it when you refer to
+a student, in summaries, in drafts, in anything you write back. Real names,
+dates of birth and state identifiers (UIC) are not available over this
+connection and never will be: they are removed from every result and every
+error before it leaves the server, by design, not by omission. Do not ask for
+them, do not try to infer them, and do not treat their absence as an error to
+work around. If a human needs to see who student_12 is, they look it up in the
+SLP Pro app, which is allowed to show them.
+
+Every tool that takes a student takes the NUMERIC id (student_id=12), which is
+the number in the alias and the `id` on every student row.
+
 Start with get_caseload_overview. Ids returned by any list_* tool are the ids
 the matching get_*, update_* and create_* tools expect, and the hierarchy is
 always the same: student -> goal -> objective -> progress entry.
@@ -146,6 +167,153 @@ def _ctx() -> McpPrincipal:
     return current_principal()
 
 
+# --------------------------------------------------------------------------
+# the PII choke point
+# --------------------------------------------------------------------------
+def _alias_contexts() -> tuple[StudentAliasContext, ...]:
+    """
+    The roster the scrubber redacts against, in a session of its own.
+
+    Same pattern as a tool body — its own short SessionLocal, closed
+    immediately — so nothing about a tool's signature or its own session has to
+    change to be filtered.
+    """
+    try:
+        principal: Optional[McpPrincipal] = _ctx()
+    except RuntimeError:  # pragma: no cover - the middleware makes this unreachable
+        principal = None
+    db = _session()
+    try:
+        return build_contexts(db, principal)
+    finally:
+        db.close()
+
+
+def _sanitized_error(exc: BaseException, contexts) -> BaseException:
+    """
+    The same failure, with any student name scrubbed out of its message.
+
+    Tools raise ValueError with composed text, and that text reaches the model
+    verbatim (the SDK re-wraps it as `Error executing tool <name>: <message>`).
+    Two ways a name gets in: the server composes one, or — the easier one to
+    miss — the message echoes an argument the CALLER passed, which is how a
+    date parser turns into an exfiltration oracle.
+    """
+    original = str(exc)
+    cleaned = sanitize_error_message(original, contexts)
+    if cleaned == original:
+        return exc
+    try:
+        return type(exc)(cleaned)
+    except Exception:  # pragma: no cover - exotic exception signatures
+        return ValueError(cleaned)
+
+
+def tool(*decorator_args, **decorator_kwargs) -> Callable:
+    """
+    Register an MCP tool. USE THIS, never `@mcp_server.tool()` directly.
+
+    It does what the SDK's decorator does, and then the thing this server
+    cannot leave to per-tool discipline: it wraps the function so that
+
+      * its RETURN VALUE goes through `sanitize_tool_result`, and
+      * any exception it raises has its MESSAGE sanitized before it is
+        re-raised,
+
+    against a roster rebuilt for this call. A tool author cannot forget the
+    filter, cannot opt out of it, and cannot leak through an error path,
+    because none of that is written in the tool.
+
+    The wrapper carries `__pii_filtered__ = True`, and
+    `backend/tests/test_mcp_pii.py` walks the live FastMCP registry asserting
+    every registered tool has it — so a tool added with the raw decorator turns
+    CI red instead of shipping.
+
+    `functools.wraps` keeps the signature and the docstring, which is what
+    FastMCP builds the tool's schema and description from, so the wrapping is
+    invisible to a client.
+
+    Failure is CLOSED: if the roster cannot be built (database down), the
+    exception propagates and the unfiltered result is discarded rather than
+    returned unscrubbed.
+    """
+
+    def decorator(fn: Callable) -> Callable:
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            try:
+                result = fn(*args, **kwargs)
+            except Exception as exc:
+                # `from None`: the original message is the thing being
+                # scrubbed, so it must not survive as a __cause__ that some
+                # traceback formatter later prints.
+                raise _sanitized_error(exc, _alias_contexts()) from None
+            return sanitize_tool_result(result, _alias_contexts())
+
+        wrapper.__pii_filtered__ = True
+        mcp_server.tool(*decorator_args, **decorator_kwargs)(wrapper)
+        return wrapper
+
+    return decorator
+
+
+def _install_sdk_error_filter() -> None:
+    """
+    The SECOND choke point: everything the SDK raises around a tool body.
+
+    `tool()` above covers what a tool raises. It cannot cover what is raised
+    BEFORE the tool is entered, because the SDK gets there first: FastMCP
+    validates the arguments against a generated Pydantic model, and a failure
+    there is a `ToolError` whose text quotes `input_value=...` verbatim. Today
+    that value is the caller's own argument, so it is an echo rather than a
+    leak — but the shape is exactly the shape of a leak, it lands on the same
+    wire, and the next thing the SDK decides to interpolate into an error is
+    not ours to choose.
+
+    `FastMCP.call_tool` resolves `self._tool_manager.call_tool` at call time,
+    so replacing that attribute puts a filter under everything the manager
+    raises — argument validation, unknown tool, result conversion — without
+    forking the SDK or re-registering a handler.
+
+    Failure is CLOSED. If the roster cannot be built, the original message is
+    discarded for a generic one rather than passed through unfiltered: an error
+    nobody can read is a bad day, an error carrying a child's name is a breach.
+    """
+    manager = mcp_server._tool_manager
+    inner = manager.call_tool
+    if getattr(inner, "__pii_filtered__", False):  # pragma: no cover - import-once
+        return
+
+    @functools.wraps(inner)
+    async def guarded(*args, **kwargs):
+        try:
+            return await inner(*args, **kwargs)
+        except Exception as exc:
+            try:
+                contexts = _alias_contexts()
+            except Exception:  # pragma: no cover - database down
+                raise ValueError(
+                    "The MCP server could not complete that call."
+                ) from None
+            raise _sanitized_error(exc, contexts) from None
+
+    guarded.__pii_filtered__ = True
+    manager.call_tool = guarded
+
+
+def registered_tools() -> list:
+    """
+    Every tool in the live FastMCP registry, as SDK `Tool` objects.
+
+    `Tool.fn` is the wrapper `tool()` produced, which is what lets the drift
+    test check the `__pii_filtered__` marker. Reaching into `_tool_manager` is
+    deliberate: the public `FastMCP.list_tools()` is async and returns the
+    wire-protocol shape, which has the name and the schema but not the callable
+    — and the callable is the thing under test.
+    """
+    return list(mcp_server._tool_manager.list_tools())
+
+
 class _AuthShim:
     """
     Just enough of `AuthContext` for the response builders the REST routes use.
@@ -153,10 +321,16 @@ class _AuthShim:
     Those builders (`_build_session_response`, `_build_session_summary`) ask an
     AuthContext exactly one question — whether student names should be shown as
     aliases — and reusing them rather than re-deriving thirty fields by hand is
-    what keeps the agent's view of a session identical to the app's. There is
-    no "act as another user" over MCP, so `user` and `effective_user` are the
-    same object and the masking rule collapses to "admins see aliases", exactly
-    as in the app.
+    what keeps the agent's view of a session identical to the app's. Both
+    compose a `student_name` field, which is precisely the field that must not
+    carry a name here.
+
+    So the answer to that one question is hard-coded to YES, for every caller,
+    including the therapist who owns the caseload. The REST layer's rule
+    ("admins and impersonators see aliases") does not apply on this side of the
+    door: over MCP the reader is a model, never the therapist, so there is no
+    owner exception to grant. `is_admin=True` is how the shim says "mask",
+    not a claim of privilege — nothing else in those builders reads it.
     """
 
     __slots__ = ("is_admin", "user", "effective_user")
@@ -168,7 +342,7 @@ class _AuthShim:
             self.id = user_id
 
     def __init__(self, principal: McpPrincipal) -> None:
-        self.is_admin = principal.is_admin
+        self.is_admin = True
         self.user = self._User(principal.user_id)
         self.effective_user = self.user
 
@@ -232,12 +406,34 @@ def _parse_datetime(value: Optional[str], field: str) -> Optional[datetime]:
 
 
 def _student_label(student: Optional[Student], ctx: McpPrincipal) -> str:
-    """The name an agent should print — the alias when the app would mask it."""
+    """
+    The identity an agent prints for a student: the alias, always.
+
+    No caller branch, deliberately. `ctx` stays in the signature because every
+    call site has one and a future policy may want it, but there is no
+    condition under which this returns a name.
+    """
     if student is None:
         return "Unknown"
-    if ctx.is_admin:
-        return student.student_alias or f"student_{student.id}"
-    return student.full_name
+    return student.alias
+
+
+def _student_identity(payload: dict, student: Student) -> dict:
+    """
+    Rewrite a serialized student so the ALIAS is the display identity.
+
+    Belt: the recursive sanitizer would strip `first`, `last`, `uic` and
+    `date_of_birth` out of this payload anyway. Braces: doing it at the source
+    means the agent gets a clean object with an obvious identity field rather
+    than a record with holes where the names used to be, and the difference
+    shows in how an agent talks about the student.
+    """
+    for key in ("first", "last", "uic", "date_of_birth", "dateOfBirth"):
+        payload.pop(key, None)
+    alias = student.alias
+    payload["alias"] = alias
+    payload["displayName"] = alias
+    return payload
 
 
 def _load_goal(db: Session, ctx: McpPrincipal, goal_id: int) -> IEPGoal:
@@ -290,7 +486,7 @@ def _load_session(db: Session, ctx: McpPrincipal, session_id: int) -> TherapySes
 # --------------------------------------------------------------------------
 # read tools
 # --------------------------------------------------------------------------
-@mcp_server.tool()
+@tool()
 def get_caseload_overview() -> dict:
     """
     Start here. Returns who this connection key belongs to and a snapshot of
@@ -390,14 +586,18 @@ def get_caseload_overview() -> dict:
         db.close()
 
 
-@mcp_server.tool()
+@tool()
 def list_students(
     enrollment_status: Optional[str] = None,
     include_archived: bool = False,
 ) -> list[dict]:
     """
-    Every student on this caseload, as lightweight summaries (id, name, grade,
-    enrollment status, assigned teacher and case manager).
+    Every student on this caseload, as lightweight summaries (id, alias,
+    grade, enrollment status, assigned teacher and case manager).
+
+    Each row identifies its student by `alias`/`displayName` ("student_12") —
+    that is the identity you use when you talk about them. Real names, dates of
+    birth and UICs are not part of this response and cannot be requested.
 
     `enrollment_status` filters on the app's own values, typically "Active".
     `include_archived` brings back students who were archived — archived means
@@ -416,26 +616,23 @@ def list_students(
             allowed_student_ids=_scope_ids(ctx),
         )
         rows = [s for s in rows if ctx.may_see_student(s.id)]
-        out = []
-        for student in rows:
-            payload = _dump(StudentSummary, student)
-            if ctx.is_admin:
-                payload["first"] = student.student_alias or f"student_{student.id}"
-                payload["last"] = ""
-            out.append(payload)
-        return out
+        return [_student_identity(_dump(StudentSummary, student), student) for student in rows]
     finally:
         db.close()
 
 
-@mcp_server.tool()
+@tool()
 def get_student(student_id: int) -> dict:
     """
-    One student's full record: names, grade, UIC, enrollment status, assigned
+    One student's full record: alias, grade, enrollment status, assigned
     school, teacher and case manager, every IEP date the app tracks (current
     IEP, annual review due, re-evaluation due, meeting, initial evaluation,
     eligibility determination) and the disability categories the student
     qualifies under.
+
+    The student is identified by `alias`/`displayName` ("student_12"). Name,
+    date of birth and UIC are deliberately absent — they are not served over
+    this connection.
 
     `student_id` comes from list_students. Pair with list_goals(student_id) for
     what the student is actually working on.
@@ -450,16 +647,12 @@ def get_student(student_id: int) -> dict:
                 f"No student with id {student_id}. Call list_students for the "
                 f"ids that exist."
             )
-        payload = _dump(StudentRead, student)
-        if ctx.is_admin:
-            payload["first"] = student.student_alias or f"student_{student.id}"
-            payload["last"] = ""
-        return payload
+        return _student_identity(_dump(StudentRead, student), student)
     finally:
         db.close()
 
 
-@mcp_server.tool()
+@tool()
 def list_goals(
     student_id: Optional[int] = None,
     goal_status: Optional[str] = None,
@@ -489,7 +682,7 @@ def list_goals(
         db.close()
 
 
-@mcp_server.tool()
+@tool()
 def get_goal(goal_id: int) -> dict:
     """
     One IEP goal WITH its objectives and each objective's progress entries —
@@ -513,7 +706,7 @@ def get_goal(goal_id: int) -> dict:
         db.close()
 
 
-@mcp_server.tool()
+@tool()
 def list_objectives(goal_id: int) -> list[dict]:
     """
     The objectives under one goal, in objective_number order, each with its
@@ -533,7 +726,7 @@ def list_objectives(goal_id: int) -> list[dict]:
         db.close()
 
 
-@mcp_server.tool()
+@tool()
 def list_progress_entries(
     objective_id: int,
     progress_date_from: Optional[str] = None,
@@ -564,7 +757,7 @@ def list_progress_entries(
         db.close()
 
 
-@mcp_server.tool()
+@tool()
 def list_therapy_sessions(
     student_id: Optional[int] = None,
     start_date: Optional[str] = None,
@@ -608,7 +801,7 @@ def list_therapy_sessions(
         db.close()
 
 
-@mcp_server.tool()
+@tool()
 def get_therapy_session(session_id: int) -> dict:
     """
     One therapy session in full: timings, notes, clinical observations, the
@@ -633,7 +826,7 @@ def get_therapy_session(session_id: int) -> dict:
         db.close()
 
 
-@mcp_server.tool()
+@tool()
 def get_schedule(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
@@ -723,7 +916,7 @@ def get_schedule(
         db.close()
 
 
-@mcp_server.tool()
+@tool()
 def list_schools() -> list[dict]:
     """
     The active schools this practice serves, with their student and teacher
@@ -737,7 +930,7 @@ def list_schools() -> list[dict]:
         db.close()
 
 
-@mcp_server.tool()
+@tool()
 def list_teachers() -> list[dict]:
     """
     The active teachers and support staff, with their display names.
@@ -754,7 +947,7 @@ def list_teachers() -> list[dict]:
         db.close()
 
 
-@mcp_server.tool()
+@tool()
 def list_eligibility_categories() -> list[dict]:
     """
     The disability categories a student can be found eligible under (the state
@@ -774,7 +967,7 @@ def list_eligibility_categories() -> list[dict]:
         db.close()
 
 
-@mcp_server.tool()
+@tool()
 def list_goal_categories() -> list[dict]:
     """
     The goal categories every IEP goal must be filed under (articulation,
@@ -796,7 +989,7 @@ def list_goal_categories() -> list[dict]:
 # --------------------------------------------------------------------------
 # write tools
 # --------------------------------------------------------------------------
-@mcp_server.tool()
+@tool()
 def create_progress_entry(
     objective_id: int,
     progress_date: str,
@@ -836,7 +1029,7 @@ def create_progress_entry(
         db.close()
 
 
-@mcp_server.tool()
+@tool()
 def update_progress_entry(
     entry_id: int,
     progress_date: Optional[str] = None,
@@ -873,7 +1066,7 @@ def update_progress_entry(
         db.close()
 
 
-@mcp_server.tool()
+@tool()
 def create_goal(
     student_id: int,
     goal_category_id: int,
@@ -921,7 +1114,7 @@ def create_goal(
         db.close()
 
 
-@mcp_server.tool()
+@tool()
 def update_goal(
     goal_id: int,
     goal_category_id: Optional[int] = None,
@@ -968,7 +1161,7 @@ def update_goal(
         db.close()
 
 
-@mcp_server.tool()
+@tool()
 def create_objective(
     goal_id: int,
     objective_number: int,
@@ -1012,7 +1205,7 @@ def create_objective(
         db.close()
 
 
-@mcp_server.tool()
+@tool()
 def update_objective(
     objective_id: int,
     objective_description: Optional[str] = None,
@@ -1046,7 +1239,7 @@ def update_objective(
         db.close()
 
 
-@mcp_server.tool()
+@tool()
 def create_therapy_session(
     student_id: int,
     session_date: str,
@@ -1130,7 +1323,7 @@ def create_therapy_session(
         db.close()
 
 
-@mcp_server.tool()
+@tool()
 def complete_therapy_session(
     session_id: int,
     session_notes: Optional[str] = None,
@@ -1180,7 +1373,7 @@ def complete_therapy_session(
         db.close()
 
 
-@mcp_server.tool()
+@tool()
 def update_student(
     student_id: int,
     grade_level: Optional[str] = None,
@@ -1200,9 +1393,9 @@ def update_student(
     enrollment status, school, assigned teacher and case manager, and the six
     IEP dates the app tracks. Only what you pass is changed.
 
-    Names and UIC are deliberately NOT editable here — a student's identity is
-    changed in the app, where it can be checked against the district's own
-    records. `school_id` comes from list_schools; `teacher_id` and
+    Names, date of birth and UIC are NOT editable here, and are not returned
+    here either — a student's identity is changed in the app, where it can be
+    checked against the district's own records. `school_id` comes from list_schools; `teacher_id` and
     `case_manager_id` from list_teachers.
 
     Moving `annual_review_due_date` or `reevaluation_due_date` moves a legal
@@ -1243,11 +1436,7 @@ def update_student(
         )
         if row is None:
             raise ValueError(f"No student with id {student_id} on your caseload.")
-        payload = _dump(StudentRead, row)
-        if ctx.is_admin:
-            payload["first"] = row.student_alias or f"student_{row.id}"
-            payload["last"] = ""
-        return payload
+        return _student_identity(_dump(StudentRead, row), row)
     finally:
         db.close()
 
@@ -1255,7 +1444,7 @@ def update_student(
 # --------------------------------------------------------------------------
 # destructive tools — both refuse without confirm=true
 # --------------------------------------------------------------------------
-@mcp_server.tool()
+@tool()
 def delete_progress_entry(entry_id: int, confirm: bool = False) -> dict:
     """
     WRITE — DESTRUCTIVE. Permanently removes one progress entry.
@@ -1301,7 +1490,7 @@ def delete_progress_entry(entry_id: int, confirm: bool = False) -> dict:
         db.close()
 
 
-@mcp_server.tool()
+@tool()
 def delete_goal(goal_id: int, confirm: bool = False) -> dict:
     """
     WRITE — DESTRUCTIVE, AND THE WIDEST-REACHING TOOL HERE. Permanently removes
@@ -1348,6 +1537,12 @@ def delete_goal(goal_id: int, confirm: bool = False) -> dict:
     finally:
         db.close()
 
+
+# Installed after every tool is registered, because it wraps the manager those
+# registrations populate. Order does not actually matter (it wraps the method,
+# not the table), but reading it here says the filter is over a finished
+# server rather than a half-built one.
+_install_sdk_error_filter()
 
 # The ASGI application the middleware hands authenticated requests to. Built at
 # import time so `main.py` can register it before the app starts serving.
