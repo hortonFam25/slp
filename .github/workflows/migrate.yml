@@ -149,18 +149,22 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
-      # Prove the logged-in service principal can mint an Azure SQL token
-      # BEFORE alembic tries. A failure here is a role/consent problem and says
-      # so; the same failure inside alembic surfaces as an opaque ODBC error.
-      #
-      # The token itself is never captured, echoed, or written anywhere -- only
-      # its expiry timestamp, which is not a secret. The ODBC driver acquires
-      # its own token from the same `az` login via
-      # Authentication=ActiveDirectoryAzCli, so no token value ever enters the
-      # environment, a file, or the log.
-      - name: Verify the service principal can get an Azure SQL token
+      # Mint the Azure SQL access token alembic will authenticate with and put
+      # it in the job env as SLP_DB_ACCESS_TOKEN (registered with add-mask so
+      # it can never appear in a log line). env.py hands it to the driver as
+      # SQL_COPT_SS_ACCESS_TOKEN -- raw token auth works on every ODBC Driver
+      # 17/18 build, unlike Authentication=ActiveDirectoryAzCli, which needs
+      # 18.1+ and rejected the connection on both the runner and dev machines.
+      # A failure here is a role/consent problem and says so; the same failure
+      # inside alembic would surface as an opaque ODBC error.
+      - name: Acquire an Azure SQL token for the service principal
         run: |
           set -euo pipefail
+          TOKEN=$(az account get-access-token \
+                    --resource https://database.windows.net/ \
+                    --query accessToken -o tsv)
+          echo "::add-mask::$TOKEN"
+          echo "SLP_DB_ACCESS_TOKEN=$TOKEN" >> "$GITHUB_ENV"
           EXPIRES=$(az account get-access-token \
                       --resource https://database.windows.net/ \
                       --query expiresOn -o tsv)
@@ -174,15 +178,23 @@ jobs:
           DB_NAME: ${{ steps.target.outputs.db_name }}
         run: |
           set -euo pipefail
-          ODBC="DRIVER={${ODBC_DRIVER}};SERVER=tcp:${SQL_SERVER},1433;DATABASE=${DB_NAME};Encrypt=yes;TrustServerCertificate=no;Connection Timeout=60;Authentication=ActiveDirectoryAzCli;"
+          ODBC="DRIVER={${ODBC_DRIVER}};SERVER=tcp:${SQL_SERVER},1433;DATABASE=${DB_NAME};Encrypt=yes;TrustServerCertificate=no;Connection Timeout=60;"
           export ODBC
           SQL_SERVER_CONNECTION_STRING="mssql+pyodbc:///?odbc_connect=$(python -c 'import os,urllib.parse;print(urllib.parse.quote_plus(os.environ["ODBC"]))')"
           export SQL_SERVER_CONNECTION_STRING
           PRESENT=$(python - <<'PY'
           import os
+          import struct
           from sqlalchemy import create_engine, text
 
-          engine = create_engine(os.environ["SQL_SERVER_CONNECTION_STRING"], pool_pre_ping=True)
+          # Same raw-token handshake env.py performs: SQL_COPT_SS_ACCESS_TOKEN.
+          token_bytes = os.environ["SLP_DB_ACCESS_TOKEN"].encode("utf-16-le")
+          attrs = {1256: struct.pack("<i", len(token_bytes)) + token_bytes}
+          engine = create_engine(
+              os.environ["SQL_SERVER_CONNECTION_STRING"],
+              pool_pre_ping=True,
+              connect_args={"attrs_before": attrs},
+          )
           catalog_query = text(
               "SELECT COUNT(*) FROM sys.tables t "
               "JOIN sys.schemas s ON s.schema_id = t.schema_id "
@@ -205,10 +217,11 @@ jobs:
           ALEMBIC_VERSION_PRESENT: ${{ steps.probe.outputs.present }}
         run: |
           set -euo pipefail
-          ODBC="DRIVER={${ODBC_DRIVER}};SERVER=tcp:${SQL_SERVER},1433;DATABASE=${DB_NAME};Encrypt=yes;TrustServerCertificate=no;Connection Timeout=60;Authentication=ActiveDirectoryAzCli;"
+          ODBC="DRIVER={${ODBC_DRIVER}};SERVER=tcp:${SQL_SERVER},1433;DATABASE=${DB_NAME};Encrypt=yes;TrustServerCertificate=no;Connection Timeout=60;"
           export ODBC
           SQL_SERVER_CONNECTION_STRING="mssql+pyodbc:///?odbc_connect=$(python -c 'import os,urllib.parse;print(urllib.parse.quote_plus(os.environ["ODBC"]))')"
           export SQL_SERVER_CONNECTION_STRING
+          # SLP_DB_ACCESS_TOKEN is in the job env (masked); env.py picks it up.
           export PYTHONPATH="$GITHUB_WORKSPACE/backend"
           cd "$GITHUB_WORKSPACE/backend/app"
 
