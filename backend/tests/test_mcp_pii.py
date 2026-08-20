@@ -49,24 +49,64 @@ S2_LAST = "Marchetti"
 S2_UIC = "UICSENTINEL456"
 S2_DOB = date(2009, 7, 23)
 
+def _dob_spellings(value: date) -> tuple[str, ...]:
+    """A birthday is a value, not a string, and the assertion has to know that.
+
+    Searching a response for `date.isoformat()` alone tests the format the app
+    writes and nothing else. A payload that reformats — a summary line composed
+    as "3/17/2011", a note the therapist typed that way in the first place —
+    passes an ISO-only search while leaking the same identifier. So the sentinel
+    is every spelling, not one.
+    """
+    return (
+        value.isoformat(),
+        f"{value.month}/{value.day}/{value.year}",
+        f"{value.month:02d}/{value.day:02d}/{value.year}",
+        f"{value.day:02d}/{value.month:02d}/{value.year}",
+        f"{value.month:02d}-{value.day:02d}-{value.year}",
+        f"{value:%B} {value.day}, {value.year}",
+        f"{value:%b} {value.day} {value.year}",
+    )
+
+
 # Every string that must never appear in anything /mcp emits.
 SENTINELS = (
     S1_FIRST,
     S1_LAST,
     f"{S1_FIRST} {S1_LAST}",
     S1_UIC,
-    S1_DOB.isoformat(),
+    *_dob_spellings(S1_DOB),
     S2_FIRST,
     S2_LAST,
     f"{S2_FIRST} {S2_LAST}",
     S2_UIC,
-    S2_DOB.isoformat(),
+    *_dob_spellings(S2_DOB),
 )
 
 # Field names that must not survive anywhere in a payload, at any depth, in any
 # casing or separator style. Compared on a normalised key, so `date_of_birth`,
 # `dateOfBirth` and `DateOfBirth` are all the same entry.
-DENYLISTED_KEYS = frozenset({"first", "last", "uic", "dateofbirth", "dob", "birthdate"})
+DENYLISTED_KEYS = frozenset(
+    {
+        "first",
+        "last",
+        "uic",
+        "dateofbirth",
+        "dob",
+        "birthdate",
+        # Not on any model reachable from here today. Listed so that the deploy
+        # that adds one is the deploy that fails, rather than the deploy that
+        # quietly starts handing a child's home address to a model.
+        "guardian",
+        "guardianname",
+        "parentguardian",
+        "emergencycontact",
+        "email",
+        "phone",
+        "phonenumber",
+        "address",
+    }
+)
 
 _NORMALIZE = re.compile(r"[^a-z0-9]+")
 

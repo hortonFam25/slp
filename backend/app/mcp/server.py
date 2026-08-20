@@ -257,6 +257,50 @@ def tool(*decorator_args, **decorator_kwargs) -> Callable:
     return decorator
 
 
+def _install_sdk_error_filter() -> None:
+    """
+    The SECOND choke point: everything the SDK raises around a tool body.
+
+    `tool()` above covers what a tool raises. It cannot cover what is raised
+    BEFORE the tool is entered, because the SDK gets there first: FastMCP
+    validates the arguments against a generated Pydantic model, and a failure
+    there is a `ToolError` whose text quotes `input_value=...` verbatim. Today
+    that value is the caller's own argument, so it is an echo rather than a
+    leak — but the shape is exactly the shape of a leak, it lands on the same
+    wire, and the next thing the SDK decides to interpolate into an error is
+    not ours to choose.
+
+    `FastMCP.call_tool` resolves `self._tool_manager.call_tool` at call time,
+    so replacing that attribute puts a filter under everything the manager
+    raises — argument validation, unknown tool, result conversion — without
+    forking the SDK or re-registering a handler.
+
+    Failure is CLOSED. If the roster cannot be built, the original message is
+    discarded for a generic one rather than passed through unfiltered: an error
+    nobody can read is a bad day, an error carrying a child's name is a breach.
+    """
+    manager = mcp_server._tool_manager
+    inner = manager.call_tool
+    if getattr(inner, "__pii_filtered__", False):  # pragma: no cover - import-once
+        return
+
+    @functools.wraps(inner)
+    async def guarded(*args, **kwargs):
+        try:
+            return await inner(*args, **kwargs)
+        except Exception as exc:
+            try:
+                contexts = _alias_contexts()
+            except Exception:  # pragma: no cover - database down
+                raise ValueError(
+                    "The MCP server could not complete that call."
+                ) from None
+            raise _sanitized_error(exc, contexts) from None
+
+    guarded.__pii_filtered__ = True
+    manager.call_tool = guarded
+
+
 def registered_tools() -> list:
     """
     Every tool in the live FastMCP registry, as SDK `Tool` objects.
@@ -1493,6 +1537,12 @@ def delete_goal(goal_id: int, confirm: bool = False) -> dict:
     finally:
         db.close()
 
+
+# Installed after every tool is registered, because it wraps the manager those
+# registrations populate. Order does not actually matter (it wraps the method,
+# not the table), but reading it here says the filter is over a finished
+# server rather than a half-built one.
+_install_sdk_error_filter()
 
 # The ASGI application the middleware hands authenticated requests to. Built at
 # import time so `main.py` can register it before the app starts serving.
