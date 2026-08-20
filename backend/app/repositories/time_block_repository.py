@@ -2,6 +2,7 @@ from datetime import datetime, date
 from typing import List, Optional
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import and_, or_, func
+from app.models.appointment import Appointment
 from app.models.time_block import TimeBlock
 from app.models.block_assignment import BlockAssignment
 from app.models.student import Student
@@ -79,7 +80,6 @@ class TimeBlockRepository:
 
     def get_time_block_appointments_by_series(self, time_block_id: int) -> dict:
         """Get all appointments for a time block grouped by series_id"""
-        from app.models.appointment import Appointment
         from sqlalchemy.orm import joinedload
         
         appointments = self.db.query(Appointment).options(
@@ -107,7 +107,6 @@ class TimeBlockRepository:
     def create_recurring_time_blocks(self, time_block_data: dict, student_ids: List[int], recurring_config: dict, activities_data: List[dict] = None) -> dict:
         """Create recurring time blocks with appointments for all assigned students"""
         from uuid import uuid4
-        from app.models.appointment import Appointment
         from app.models.therapy_session import TherapySession
         from datetime import datetime, timedelta
         
@@ -358,7 +357,6 @@ class TimeBlockRepository:
 
     def update_time_block_series(self, series_id: str, update_data: dict) -> dict:
         """Update all time blocks in a series with smart time slot recalculation"""
-        from app.models.appointment import Appointment
         from app.models.therapy_session import TherapySession
         from uuid import uuid4
         
@@ -499,7 +497,6 @@ class TimeBlockRepository:
 
     def update_time_block_series_pattern(self, series_id: str, pattern_data: dict) -> dict:
         """Update time block series with pattern changes (date shifts, day alignment)"""
-        from app.models.appointment import Appointment
         from app.models.therapy_session import TherapySession
         from datetime import timedelta
         
@@ -697,7 +694,6 @@ class TimeBlockRepository:
 
     def assign_student_with_auto_scheduling(self, time_block_id: int, student_id: int, auto_create_appointments: bool = True) -> dict:
         """Assign student to time block and optionally auto-create appointments with time splitting"""
-        from app.models.appointment import Appointment
         from app.models.therapy_session import TherapySession
         from uuid import uuid4
         
@@ -855,7 +851,6 @@ class TimeBlockRepository:
 
     def delete_time_block(self, time_block_id: int) -> bool:
         """Delete a time block and all associated appointments, therapy sessions, goals, and objectives"""
-        from app.models.appointment import Appointment
         from app.models.therapy_session import TherapySession
         from app.models.session_goal import SessionGoal
         from app.models.session_objective import SessionObjective

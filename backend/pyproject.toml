@@ -84,21 +84,20 @@ extend-exclude = [
 [tool.ruff.lint]
 select = ["E9", "F63", "F7", "F82"]
 
-# Two pre-existing F821 hits, quarantined per-file so the rule stays live for
-# the other ~200 modules instead of being switched off wholesale. Both are real
-# and both want a code change, which is why they are listed here by hand rather
-# than blanket-ignored — delete the entry once its file is fixed and CI will
-# start guarding it again.
-#
-#   time_block_repository.py:825-828 — `Appointment` is used inside
-#     update_appointments_for_time_block() but the `from app.models.appointment
-#     import Appointment` line that every other method in the file has is
-#     missing. This is a latent NameError, not a lint nit.
+# One pre-existing F821 hit, quarantined per-file so the rule stays live for
+# the other ~200 modules instead of being switched off wholesale. It is real and
+# it wants a code change, which is why it is listed here by hand rather than
+# blanket-ignored — delete the entry once the file is fixed and CI will start
+# guarding it again.
 #
 #   therapy_session_repository.py:248 — `'SessionObjectiveUpdate'` is a string
 #     annotation for a class that is never imported. Harmless at runtime (the
 #     annotation is never evaluated), but it wants an
 #     `if TYPE_CHECKING:` import to be honest.
+#
+# time_block_repository.py used to be listed here too: `Appointment` was used in
+# remove_student_with_auto_rescheduling() with no import in scope — a live
+# NameError, not a lint nit. The import now sits in the file header, the rule is
+# green, and tests/test_time_block_repository.py keeps it that way.
 [tool.ruff.lint.per-file-ignores]
-"app/repositories/time_block_repository.py" = ["F821"]
 "app/repositories/therapy_session_repository.py" = ["F821"]
