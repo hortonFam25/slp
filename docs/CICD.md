@@ -110,13 +110,16 @@ https://<scm-host>/api/vfs/site/wwwroot/...`, authenticated with the same ARM
 token `azure/login` already obtained) confirming the deployed
 `index.html`'s referenced bundle actually exists on disk and is >100 KB.
 
-**Kudu VFS, not a plain `GET /`, because this app has Easy Auth in front of
-it.** `slppro` has App Service Authentication enabled and configured to
-answer an anonymous request to `/` with a bare `401`. **That 401 is
-expected** — it means pm2 is up and Easy Auth is doing its job, not that the
-deploy failed. The final "is it answering" check in `deploy.yml` treats
-`200` (with a real shell), `401`, and `302` all as success; only a timeout,
-`502`/`503`, or a connection failure fails the job.
+**Kudu VFS as the content check, `GET /` as the liveness check.** History:
+`slppro` originally had App Service Authentication (Easy Auth) enabled, which
+answered anonymous requests with a bare `401` — that's why the workflow
+verifies build contents through Kudu VFS instead of scraping `/`. Easy Auth
+was removed on 2026-08-20 (it was redundant — the SPA does its own MSAL
+sign-in, and its client secret had silently expired, breaking logins), so an
+anonymous `GET /` now returns `200` with the real shell, matching the
+RamHuddle setup. `deploy.yml` still accepts `200`/`401`/`302` as liveness so
+it works under either configuration; only a timeout, `502`/`503`, or a
+connection failure fails the job.
 
 ### No secrets — OIDC federated identity
 
@@ -238,13 +241,12 @@ App Service setting rather than code.
   for this — if a fresh runner image is missing something else `pyodbc`
   needs, the error will be a compiler/linker failure during that `pip
   install` step, not an import error later.
-- **`slppro` (frontend) returns 401 on `GET /`.** This is expected, not a
-  broken deploy — Easy Auth is enabled on that App Service and answers
-  anonymous requests with `401` before pm2 is ever reached. `deploy.yml`
-  treats `401`/`302` as a passing liveness result and separately verifies
-  the actual build contents via Kudu VFS (see above). If you see a genuine
-  outage, it'll show up as a timeout or `502`/`503` in that same step, not
-  as `401`.
+- **`slppro` (frontend) returns 401 on `GET /`.** As of 2026-08-20 this is
+  NOT expected anymore: Easy Auth was removed from that App Service (the SPA
+  authenticates via MSAL; the API verifies tokens). Anonymous `GET /` should
+  return `200` with the app shell. If you see `401` again, someone has
+  re-enabled App Service Authentication — check the portal's Authentication
+  blade. A genuine outage shows up as a timeout or `502`/`503`.
 - **`tsc --noEmit` isn't part of CI.** This is intentional (see above), not
   a gap someone forgot — don't add it back without first working through
   the 76 existing errors, or every PR will go red on day one.
