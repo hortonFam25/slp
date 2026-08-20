@@ -111,3 +111,12 @@ venv/
 .venv/
 __pycache__/
 *.pyc
+
+# Database tooling working files (see docs/DATABASE.md).
+# schema-*.json are catalog-only inventories produced by
+# backend/scripts/provision_dev_db.py --compare. They hold table and column
+# NAMES and no rows, but a prod inventory is still a map of the production
+# schema and does not belong in git.
+db-artifacts/
+schema-*.json
+dev-seed.db

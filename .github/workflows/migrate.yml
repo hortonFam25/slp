@@ -1,0 +1,249 @@
+name: migrate
+
+# Alembic against the Azure SQL databases. Manual only -- schema changes ship
+# when a human decides they ship, not when a branch merges.
+#
+#   dev  -> slpdb_dev   rehearsal. Fake data, disposable, no confirmation.
+#   prod -> slpdb_2     real student PII. Requires `confirm: migrate-prod`.
+#
+# What it does, in order:
+#
+#   1. refuse immediately if prod was picked without the confirmation string;
+#   2. install ODBC Driver 18 and log in to Azure with OIDC (no secrets);
+#   3. ask the CATALOG whether an `alembic_version` table exists on the target;
+#   4. if it does NOT -- prod's schema predates alembic -- `alembic stamp
+#      f2d4b8c9a1e0`, the revision that pre-MCP schema corresponds to. This is a
+#      ONE-TIME bootstrap: it writes a version row and touches nothing else;
+#   5. `alembic upgrade head`;
+#   6. echo `alembic current`.
+#
+# It never issues a query against a user table. The only statements that reach
+# the server are alembic's own DDL, alembic's reads/writes of `alembic_version`,
+# and one `sys.tables` lookup. No row of student data is read, printed, or
+# logged -- see docs/DATABASE.md for the rule this implements.
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Which database to migrate"
+        type: choice
+        required: true
+        default: dev
+        options:
+          - dev
+          - prod
+      confirm:
+        description: 'Type "migrate-prod" to migrate production. Ignored for dev.'
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  # OIDC: azure/login exchanges this for an Azure token. Same pattern as
+  # deploy.yml -- the three ids below are repo VARIABLES, not secrets.
+  id-token: write
+  contents: read
+
+concurrency:
+  # One migration at a time across both targets. Two alembic runs racing for
+  # the same alembic_version row is how a schema ends up half-applied.
+  group: migrate-slppro
+  cancel-in-progress: false
+
+env:
+  SQL_SERVER: hortonfam.database.windows.net
+  ODBC_DRIVER: ODBC Driver 18 for SQL Server
+  # The revision prod's pre-alembic schema corresponds to. Same constant as
+  # PRE_ALEMBIC_BASELINE_REVISION in backend/scripts/provision_dev_db.py.
+  PRE_ALEMBIC_BASELINE_REVISION: f2d4b8c9a1e0
+  PYTHONIOENCODING: utf-8
+
+jobs:
+  migrate:
+    name: migrate (${{ inputs.target }})
+    runs-on: ubuntu-latest
+    # Fail before anything is installed, logged into, or connected to.
+    steps:
+      # The inputs arrive through `env`, never spliced into the script text.
+      # `confirm` is free-form: interpolating it directly would let whoever
+      # dispatches the workflow run arbitrary shell on the runner.
+      - name: Gate -- prod requires the confirmation string
+        env:
+          TARGET: ${{ inputs.target }}
+          CONFIRM: ${{ inputs.confirm }}
+        run: |
+          set -euo pipefail
+          case "$TARGET" in
+            dev)
+              echo "target=dev (slpdb_dev) -- no confirmation required"
+              ;;
+            prod)
+              if [ "$CONFIRM" != "migrate-prod" ]; then
+                echo "FAIL: target=prod requires confirm to be exactly 'migrate-prod'."
+                echo "      Got a value of length ${#CONFIRM}."
+                exit 1
+              fi
+              echo "target=prod (slpdb_2) -- confirmation accepted"
+              ;;
+            *)
+              echo "FAIL: unknown target '$TARGET'"
+              exit 1
+              ;;
+          esac
+
+      - name: Resolve the target database
+        id: target
+        env:
+          TARGET: ${{ inputs.target }}
+        run: |
+          set -euo pipefail
+          if [ "$TARGET" = 'prod' ]; then
+            DB_NAME=slpdb_2
+          else
+            DB_NAME=slpdb_dev
+          fi
+          echo "db_name=$DB_NAME" >> "$GITHUB_OUTPUT"
+          echo "Migrating $DB_NAME on $SQL_SERVER"
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # The App Service is PYTHON|3.11 and CI pins 3.11. Alembic runs the
+          # same migration scripts the app imports, so it runs on the same
+          # interpreter version.
+          python-version: "3.11"
+
+      # pyodbc needs the unixODBC headers to build, and the driver itself comes
+      # from Microsoft's apt repository. `packages-microsoft-prod.deb` is keyed
+      # to the runner's Ubuntu release rather than hard-coded, so a runner image
+      # bump does not silently install the wrong repo definition.
+      - name: Install ODBC Driver 18 (Microsoft apt repository)
+        run: |
+          set -euo pipefail
+          UBUNTU_VERSION=$(grep -oP '(?<=^VERSION_ID=")[^"]+' /etc/os-release)
+          echo "runner is Ubuntu $UBUNTU_VERSION"
+          curl -fsSL -o /tmp/packages-microsoft-prod.deb \
+            "https://packages.microsoft.com/config/ubuntu/${UBUNTU_VERSION}/packages-microsoft-prod.deb"
+          sudo dpkg -i /tmp/packages-microsoft-prod.deb
+          rm -f /tmp/packages-microsoft-prod.deb
+          sudo apt-get update -qq
+          sudo ACCEPT_EULA=Y apt-get install -y -qq msodbcsql18 unixodbc-dev
+          odbcinst -q -d
+
+      - name: Install alembic, SQLAlchemy and pyodbc
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          # Pinned to the versions in backend/requirements.txt: the migration
+          # scripts were written against them, and a surprise major version is
+          # not something to discover mid-upgrade against production.
+          pip install "alembic==1.13.1" "SQLAlchemy==2.0.23" "pyodbc==5.0.1" "python-dotenv==1.0.0" \
+                      "pydantic-settings" "pydantic"
+
+      - name: Azure login (OIDC -- no secrets)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      # Prove the logged-in service principal can mint an Azure SQL token
+      # BEFORE alembic tries. A failure here is a role/consent problem and says
+      # so; the same failure inside alembic surfaces as an opaque ODBC error.
+      #
+      # The token itself is never captured, echoed, or written anywhere -- only
+      # its expiry timestamp, which is not a secret. The ODBC driver acquires
+      # its own token from the same `az` login via
+      # Authentication=ActiveDirectoryAzCli, so no token value ever enters the
+      # environment, a file, or the log.
+      - name: Verify the service principal can get an Azure SQL token
+        run: |
+          set -euo pipefail
+          EXPIRES=$(az account get-access-token \
+                      --resource https://database.windows.net/ \
+                      --query expiresOn -o tsv)
+          echo "Azure SQL token acquired for the logged-in principal (expires $EXPIRES)"
+
+      # One statement, against sys.tables. Catalog metadata only -- this is the
+      # closest this workflow ever gets to reading data, and it does not.
+      - name: Does the target have an alembic_version table?
+        id: probe
+        env:
+          DB_NAME: ${{ steps.target.outputs.db_name }}
+        run: |
+          set -euo pipefail
+          ODBC="DRIVER={${ODBC_DRIVER}};SERVER=tcp:${SQL_SERVER},1433;DATABASE=${DB_NAME};Encrypt=yes;TrustServerCertificate=no;Connection Timeout=60;Authentication=ActiveDirectoryAzCli;"
+          export ODBC
+          SQL_SERVER_CONNECTION_STRING="mssql+pyodbc:///?odbc_connect=$(python -c 'import os,urllib.parse;print(urllib.parse.quote_plus(os.environ["ODBC"]))')"
+          export SQL_SERVER_CONNECTION_STRING
+          PRESENT=$(python - <<'PY'
+          import os
+          from sqlalchemy import create_engine, text
+
+          engine = create_engine(os.environ["SQL_SERVER_CONNECTION_STRING"], pool_pre_ping=True)
+          catalog_query = text(
+              "SELECT COUNT(*) FROM sys.tables t "
+              "JOIN sys.schemas s ON s.schema_id = t.schema_id "
+              "WHERE t.name = 'alembic_version' AND s.name = 'dbo'"
+          )
+          with engine.connect() as connection:
+              print("yes" if connection.execute(catalog_query).scalar_one() else "no")
+          PY
+          )
+          echo "alembic_version present: $PRESENT"
+          echo "present=$PRESENT" >> "$GITHUB_OUTPUT"
+
+      # app/alembic.ini says `script_location = alembic`, a RELATIVE path, so
+      # alembic has to run with backend/app as the working directory -- from
+      # anywhere else it cannot find versions/ at all. backend/ goes on
+      # PYTHONPATH because env.py imports the models as `app.*`.
+      - name: Run alembic
+        env:
+          DB_NAME: ${{ steps.target.outputs.db_name }}
+          ALEMBIC_VERSION_PRESENT: ${{ steps.probe.outputs.present }}
+        run: |
+          set -euo pipefail
+          ODBC="DRIVER={${ODBC_DRIVER}};SERVER=tcp:${SQL_SERVER},1433;DATABASE=${DB_NAME};Encrypt=yes;TrustServerCertificate=no;Connection Timeout=60;Authentication=ActiveDirectoryAzCli;"
+          export ODBC
+          SQL_SERVER_CONNECTION_STRING="mssql+pyodbc:///?odbc_connect=$(python -c 'import os,urllib.parse;print(urllib.parse.quote_plus(os.environ["ODBC"]))')"
+          export SQL_SERVER_CONNECTION_STRING
+          export PYTHONPATH="$GITHUB_WORKSPACE/backend"
+          cd "$GITHUB_WORKSPACE/backend/app"
+
+          if [ "$ALEMBIC_VERSION_PRESENT" = "no" ]; then
+            echo "--- one-time bootstrap ---"
+            echo "No alembic_version table on ${DB_NAME}: its schema predates alembic."
+            echo "Stamping ${PRE_ALEMBIC_BASELINE_REVISION} so the migrations that follow"
+            echo "start from the right place. This writes a version row and no other change."
+            alembic -c alembic.ini stamp "$PRE_ALEMBIC_BASELINE_REVISION"
+          else
+            echo "alembic_version exists; skipping the bootstrap stamp."
+          fi
+
+          echo "--- before ---"
+          alembic -c alembic.ini current
+
+          echo "--- upgrade head ---"
+          alembic -c alembic.ini upgrade head
+
+          echo "--- after ---"
+          alembic -c alembic.ini current
+
+      - name: Summary
+        if: always()
+        env:
+          DB_NAME: ${{ steps.target.outputs.db_name }}
+          TARGET: ${{ inputs.target }}
+          PROBE: ${{ steps.probe.outputs.present || 'unknown' }}
+          RESULT: ${{ job.status }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### migrate: \`${DB_NAME:-unresolved}\`"
+            echo ""
+            echo "- target: \`${TARGET}\` -> \`${DB_NAME:-unresolved}\` on \`${SQL_SERVER}\`"
+            echo "- alembic_version present before the run: \`${PROBE}\`"
+            echo "- result: \`${RESULT}\`"
+          } >> "$GITHUB_STEP_SUMMARY"

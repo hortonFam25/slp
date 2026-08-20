@@ -21,5 +21,9 @@ objectives, progress entries, therapy sessions, and scheduling.
 - [**CI/CD**](docs/CICD.md) — the GitHub Actions pipeline: PR checks,
   label-gated auto-merge, and the Azure deploy, including the one-time OIDC
   setup.
+- [**Databases**](docs/DATABASE.md) — the three environments (`slpdb_2` prod,
+  `slpdb_dev` dev, local sqlite), Entra token auth, the provisioning and
+  seeding runbook, the migration runbook, and the rules for touching
+  production (catalog views only — it holds real student PII).
 - [AI agent framework](docs/ai-agent-framework.md) — the separate in-app AI
   chat feature (OpenAI Agents SDK), distinct from the MCP server above.

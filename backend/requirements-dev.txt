@@ -17,3 +17,9 @@ ruff==0.4.8
 # it. It is already pinned in requirements.txt; repeated here (same pin) so the
 # dev file stands on its own.
 httpx==0.27.2
+
+# Fake, deterministic caseload data for backend/scripts/seed_dev.py and the
+# sqlite smoke test that exercises it (backend/tests/test_seed_dev.py). Dev and
+# CI only — nothing in the deployment zip imports it, and the data it generates
+# is only ever written to slpdb_dev or a local sqlite file. See docs/DATABASE.md.
+faker==25.9.1
