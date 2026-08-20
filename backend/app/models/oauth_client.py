@@ -54,7 +54,8 @@ class OAuthClient(Base):
     token_endpoint_auth_method = Column(String(32), nullable=False, default="none")
 
     # Written by the application (datetime.utcnow) rather than by a server
-    # default, exactly as api_tokens does: the rest of this schema uses
-    # GETDATE(), which is SQL Server only, and these rows are also created
-    # against SQLite in development.
+    # default, exactly as api_tokens does. (The rest of the schema uses a server
+    # default; since the GETDATE() sweep that is the portable `func.now()`, so
+    # this column could move to one too — left as-is to stay in step with
+    # api_tokens rather than drift from it.)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)

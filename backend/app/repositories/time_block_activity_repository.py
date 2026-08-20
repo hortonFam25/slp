@@ -1,3 +1,4 @@
+import logging
 from typing import List, Optional
 from sqlalchemy.orm import Session
 from sqlalchemy import and_
@@ -6,6 +7,8 @@ from app.models.time_block_activity import TimeBlockActivity
 from app.models.activity_student_assignment import ActivityStudentAssignment
 from app.models.time_block import TimeBlock
 from app.schemas.time_block import TimeBlockActivityCreate, TimeBlockActivityUpdate
+
+logger = logging.getLogger(__name__)
 
 
 class TimeBlockActivityRepository:
@@ -152,10 +155,10 @@ class TimeBlockActivityRepository:
             )
         ).all()
         
-        print(f"🔍 Found {len(appointments)} appointments with series_id {series_id}")
+        logger.debug("Found %d appointments with series_id %s", len(appointments), series_id)
         
         time_block_ids = list(set([apt.time_block_id for apt in appointments if apt.time_block_id]))
-        print(f"🔍 Unique time block IDs in series: {time_block_ids}")
+        logger.debug("Unique time block IDs in series: %s", time_block_ids)
         
         if not time_block_ids:
             return {"success": False, "message": "No time blocks found for this series"}
@@ -166,12 +169,12 @@ class TimeBlockActivityRepository:
         for time_block_id in time_block_ids:
             try:
                 activities = self.get_activities_by_time_block(time_block_id)
-                print(f"🔍 Time block {time_block_id} has {len(activities)} activities")
+                logger.debug("Time block %s has %d activities", time_block_id, len(activities))
                 
                 # If this time block has no activities but we're trying to update activities,
                 # create the activities for this time block first
                 if len(activities) == 0 and len(activity_updates) > 0:
-                    print(f"🔄 Creating missing activities for time block {time_block_id}")
+                    logger.debug("Creating missing activities for time block %s", time_block_id)
                     for activity_update in activity_updates:
                         # Create new activity for this time block
                         new_activity = TimeBlockActivity(
@@ -206,7 +209,11 @@ class TimeBlockActivityRepository:
                             self.db.add(assignment)
                         
                         updated_activities.append(new_activity)
-                        print(f"  Created activity '{new_activity.activity_name}' with {len(assigned_student_ids)} students")
+                        logger.debug(
+                            "Created activity %r with %d students",
+                            new_activity.activity_name,
+                            len(assigned_student_ids),
+                        )
                     
                     # Skip to next time block since we just created all activities
                     continue
@@ -220,7 +227,11 @@ class TimeBlockActivityRepository:
                         target_activity = next((act for act in activities if act.activity_name == activity_update['activity_name']), None)
                 
                     if target_activity:
-                        print(f"🔄 Updating activity '{target_activity.activity_name}' in time block {time_block_id}")
+                        logger.debug(
+                            "Updating activity %r in time block %s",
+                            target_activity.activity_name,
+                            time_block_id,
+                        )
                         
                         # Update the activity fields (exclude read-only, datetime, and relationship fields)
                         excluded_fields = ['id', 'time_block_id', 'created_date', 'modified_date', 'start_datetime', 'end_datetime', 'assigned_students', 'student_assignments']
@@ -228,7 +239,7 @@ class TimeBlockActivityRepository:
                             if hasattr(target_activity, field) and field not in excluded_fields:
                                 old_value = getattr(target_activity, field)
                                 setattr(target_activity, field, value)
-                                print(f"  {field}: {old_value} → {value}")
+                                logger.debug("  %s: %s to %s", field, old_value, value)
                         
                         # Refresh to ensure time_block relationship is loaded
                         self.db.flush()
@@ -236,7 +247,11 @@ class TimeBlockActivityRepository:
                         
                         # Always sync datetime fields after any update to ensure consistency
                         target_activity.sync_datetime_with_minutes()
-                        print(f"  Synced minutes → datetime: {target_activity.start_datetime} - {target_activity.end_datetime}")
+                        logger.debug(
+                            "Synced minutes to datetime: %s - %s",
+                            target_activity.start_datetime,
+                            target_activity.end_datetime,
+                        )
                         
                         # Update student assignments if provided
                         if 'assigned_student_ids' in activity_update:
@@ -256,12 +271,12 @@ class TimeBlockActivityRepository:
                                 )
                                 self.db.add(assignment)
                             
-                            print(f"  Updated student assignments: {len(new_student_ids)} students")
+                            logger.debug("Updated student assignments: %d students", len(new_student_ids))
                         
                         updated_activities.append(target_activity)
                     
             except Exception as e:
-                print(f"❌ Error processing time block {time_block_id}: {str(e)}")
+                logger.exception("Error processing time block %s", time_block_id)
                 # Rollback the session to clear the error state
                 self.db.rollback()
                 # Continue with other time blocks even if one fails

@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Date, DateTime, Text, ForeignKey, text
+from sqlalchemy import Column, Integer, String, Date, DateTime, Text, ForeignKey, func
 from sqlalchemy.sql.sqltypes import Numeric
 from sqlalchemy.orm import relationship
 from app.db.base import Base
@@ -18,8 +18,8 @@ class ProgressTracking(Base):
     trials_total = Column(Integer, nullable=True)
     qualitative_notes = Column(Text, nullable=True)
     session_duration_minutes = Column(Integer, nullable=True)
-    created_date = Column(DateTime, nullable=False, server_default=text('GETDATE()'))
-    modified_date = Column(DateTime, nullable=False, server_default=text('GETDATE()'))
+    created_date = Column(DateTime, nullable=False, server_default=func.now())
+    modified_date = Column(DateTime, nullable=False, server_default=func.now())
 
     # Relationships
     student = relationship("Student", back_populates="progress_tracking")

@@ -1,3 +1,4 @@
+import logging
 from typing import List, Dict, Any, Optional
 from sqlalchemy.orm import Session
 from datetime import date, datetime
@@ -16,6 +17,8 @@ from app.schemas.goals_import import (
 )
 from app.schemas.iep_goal import IEPGoalCreate
 from app.schemas.goal_objective import GoalObjectiveCreate
+
+logger = logging.getLogger(__name__)
 
 
 class GoalsImportService:
@@ -150,14 +153,14 @@ class GoalsImportService:
                     self.db.commit()
                 except Exception as e:
                     self.db.rollback()
-                    print(f"Batch commit error at row {processed_count}: {e}")
+                    logger.exception("Batch commit error at row %s", processed_count)
         
         # Final commit for any remaining items
         try:
             self.db.commit()
         except Exception as e:
             self.db.rollback()
-            print(f"Final commit error: {e}")
+            logger.exception("Final commit error")
         
         return result
     
@@ -181,7 +184,7 @@ class GoalsImportService:
             
         except Exception as e:
             # If we can't create/find category, return a default one or None
-            print(f"Warning: Could not get/create goal category '{category_name}': {e}")
+            logger.warning("Could not get/create goal category %r: %s", category_name, e)
             # Try to get the first available category
             try:
                 categories = self.goal_category_repo.get_all_categories(active_only=True)

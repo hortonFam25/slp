@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, Boolean, Text, ForeignKey, text
+from sqlalchemy import Column, Integer, String, DateTime, Boolean, Text, ForeignKey, func
 from sqlalchemy.orm import relationship
 import json
 from app.db.base import Base
@@ -32,8 +32,8 @@ class Appointment(Base):
     series_metadata = Column(Text, nullable=True)
     
     # Metadata
-    created_date = Column(DateTime, nullable=False, server_default=text('GETDATE()'))
-    modified_date = Column(DateTime, nullable=False, server_default=text('GETDATE()'))
+    created_date = Column(DateTime, nullable=False, server_default=func.now())
+    modified_date = Column(DateTime, nullable=False, server_default=func.now())
     created_by = Column(String(100), nullable=True)
 
     # Relationships

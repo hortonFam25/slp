@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, text
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, func
 from sqlalchemy.orm import relationship
 from app.db.base import Base
 
@@ -12,12 +12,12 @@ class BlockAssignment(Base):
     
     # Assignment details
     status = Column(String(20), nullable=False, server_default='assigned', index=True)
-    assignment_date = Column(DateTime, nullable=False, server_default=text('GETDATE()'))
+    assignment_date = Column(DateTime, nullable=False, server_default=func.now())
     removed_date = Column(DateTime, nullable=True)
     
     # Metadata
-    created_date = Column(DateTime, nullable=False, server_default=text('GETDATE()'))
-    modified_date = Column(DateTime, nullable=False, server_default=text('GETDATE()'))
+    created_date = Column(DateTime, nullable=False, server_default=func.now())
+    modified_date = Column(DateTime, nullable=False, server_default=func.now())
     created_by = Column(String(100), nullable=True)
 
     # Relationships

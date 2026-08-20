@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Date, DateTime, Boolean, ForeignKey, text
+from sqlalchemy import Column, Integer, String, Date, DateTime, Boolean, ForeignKey, func
 from sqlalchemy.orm import relationship
 from app.db.base import Base
 
@@ -31,8 +31,8 @@ class Student(Base):
     teacher_id = Column(Integer, ForeignKey('teachers.id'), nullable=True, index=True)
     case_manager_id = Column(Integer, ForeignKey('teachers.id'), nullable=True, index=True)
     
-    created_date = Column(DateTime, nullable=False, server_default=text('GETDATE()'))
-    modified_date = Column(DateTime, nullable=False, server_default=text('GETDATE()'))
+    created_date = Column(DateTime, nullable=False, server_default=func.now())
+    modified_date = Column(DateTime, nullable=False, server_default=func.now())
 
     # Relationships
     service_information = relationship("ServiceInformation", back_populates="student")

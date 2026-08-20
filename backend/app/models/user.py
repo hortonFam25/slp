@@ -1,4 +1,4 @@
-from sqlalchemy import Boolean, Column, DateTime, Integer, String, text
+from sqlalchemy import Boolean, Column, DateTime, func, Integer, String
 from sqlalchemy.orm import relationship
 
 from app.db.base import Base
@@ -13,8 +13,8 @@ class User(Base):
     display_name = Column(String(200), nullable=True)
     role = Column(String(20), nullable=False, server_default="basic", index=True)
     is_active = Column(Boolean, nullable=False, server_default="1", index=True)
-    created_date = Column(DateTime, nullable=False, server_default=text("GETDATE()"))
-    modified_date = Column(DateTime, nullable=False, server_default=text("GETDATE()"))
+    created_date = Column(DateTime, nullable=False, server_default=func.now())
+    modified_date = Column(DateTime, nullable=False, server_default=func.now())
 
     student_access_links = relationship(
         "UserStudentAccess",

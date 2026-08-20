@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime, date
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -33,6 +34,8 @@ from app.schemas.block_assignment import (
     BlockAssignmentSummary
 )
 
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/scheduling", tags=["scheduling"], dependencies=[Depends(get_auth_context)])
 
@@ -320,8 +323,8 @@ def update_appointment_series_pattern(
     db: Session = Depends(get_db)
 ):
     """Update appointment series with pattern-aware logic"""
-    print(f"🔄 Appointment Series Pattern Update - Series ID: {series_id}")
-    print(f"🔄 Received pattern_data: {pattern_data}")
+    logger.info("Appointment series pattern update for series %s", series_id)
+    logger.debug("Received pattern_data: %s", pattern_data)
     
     repo = AppointmentRepository(db)
     
@@ -339,7 +342,7 @@ def update_appointment_series_pattern(
         time_block_ids = list(set([apt.time_block_id for apt in updated_appointments if apt.time_block_id]))
         updated_time_blocks = []
         
-        print(f"🔄 Updating {len(time_block_ids)} time blocks to match appointment changes")
+        logger.debug("Updating %d time blocks to match appointment changes", len(time_block_ids))
         
         for time_block_id in time_block_ids:
             time_block = time_block_repo.get_time_block(time_block_id)
@@ -358,7 +361,12 @@ def update_appointment_series_pattern(
                     time_block.end_datetime = max(end_times)
                     time_block.modified_date = datetime.now()
                     
-                    print(f"🔄 Updating time block {time_block_id}: {old_start} → {time_block.start_datetime}")
+                    logger.debug(
+                        "Updating time block %s: %s to %s",
+                        time_block_id,
+                        old_start,
+                        time_block.start_datetime,
+                    )
                     
                     updated_time_blocks.append(time_block)
         
@@ -650,8 +658,8 @@ def update_time_block_series_pattern(
     from app.repositories.appointment_repository import AppointmentRepository
     from app.schemas.appointment import SeriesPatternUpdate
     
-    print(f"🔄 Using EXISTING appointment pattern logic for series: {series_id}")
-    print(f"🔄 Pattern data: {pattern_data}")
+    logger.info("Using appointment pattern logic for time block series %s", series_id)
+    logger.debug("Pattern data: %s", pattern_data)
     
     try:
         appointment_repo = AppointmentRepository(db)
@@ -670,7 +678,10 @@ def update_time_block_series_pattern(
         # Use the existing appointment series pattern update (this works for individual appointments)
         updated_appointments = appointment_repo.update_appointment_series_pattern(series_id, series_pattern_update)
         
-        print(f"✅ Appointment pattern update completed - {len(updated_appointments)} appointments updated")
+        logger.info(
+            "Appointment pattern update completed - %d appointments updated",
+            len(updated_appointments),
+        )
         
         # Now update the time blocks to match the updated appointments
         time_block_ids = list(set([apt.time_block_id for apt in updated_appointments if apt.time_block_id]))
@@ -693,7 +704,12 @@ def update_time_block_series_pattern(
                     time_block.end_datetime = max(end_times)
                     time_block.modified_date = datetime.now()
                     
-                    print(f"🔄 Updating time block {time_block_id}: {old_start} → {time_block.start_datetime}")
+                    logger.debug(
+                        "Updating time block %s: %s to %s",
+                        time_block_id,
+                        old_start,
+                        time_block.start_datetime,
+                    )
                     
                     # Update other fields if provided
                     if pattern_data.get('title'):
@@ -707,7 +723,11 @@ def update_time_block_series_pattern(
         
         db.commit()
         
-        print(f"✅ Final result: Updated {len(updated_time_blocks)} time blocks and {len(updated_appointments)} appointments")
+        logger.info(
+            "Updated %d time blocks and %d appointments",
+            len(updated_time_blocks),
+            len(updated_appointments),
+        )
         
         return {
             "message": "Time block series pattern updated successfully",
@@ -717,7 +737,7 @@ def update_time_block_series_pattern(
             "appointments": updated_appointments
         }
     except Exception as e:
-        print(f"❌ Time Block Pattern Update Error: {str(e)}")
+        logger.exception("Time block pattern update failed for series %s", series_id)
         raise HTTPException(status_code=500, detail=f"Failed to update time block series pattern: {str(e)}")
 
 
@@ -1335,8 +1355,8 @@ def update_activity_series(
     db: Session = Depends(get_db)
 ):
     """Update activities across all time blocks in a series"""
-    print(f"🔄 Activity Series Update - Series ID: {series_id}")
-    print(f"🔄 Activity updates: {activity_updates}")
+    logger.info("Activity series update for series %s", series_id)
+    logger.debug("Activity updates: %s", activity_updates)
     
     repo = TimeBlockActivityRepository(db)
     
@@ -1346,10 +1366,11 @@ def update_activity_series(
         if not result.get("success"):
             raise HTTPException(status_code=404, detail=result.get("message", "Series not found"))
         
-        print(f"✅ Activity series update completed: {result}")
+        logger.info("Activity series update completed for series %s", series_id)
+        logger.debug("Activity series update result: %s", result)
         return result
     except Exception as e:
-        print(f"❌ Activity series update error: {str(e)}")
-        import traceback
-        traceback.print_exc()
+        # logger.exception carries the traceback, so the bare traceback.print_exc()
+        # that used to sit here is redundant.
+        logger.exception("Activity series update failed for series %s", series_id)
         raise HTTPException(status_code=500, detail=f"Failed to update activity series: {str(e)}")

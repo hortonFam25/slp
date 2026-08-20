@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text, Boolean, DateTime, text
+from sqlalchemy import Column, Integer, String, Text, Boolean, DateTime, func
 from sqlalchemy.orm import relationship
 from typing import List, Optional
 from app.db.base import Base
@@ -18,8 +18,8 @@ class Teacher(Base):
     preferred_contact_method = Column(String(20), nullable=True)
     notes = Column(Text, nullable=True)
     is_active = Column(Boolean, nullable=False, server_default='1')
-    created_date = Column(DateTime, nullable=False, server_default=text('GETDATE()'))
-    modified_date = Column(DateTime, nullable=False, server_default=text('GETDATE()'))
+    created_date = Column(DateTime, nullable=False, server_default=func.now())
+    modified_date = Column(DateTime, nullable=False, server_default=func.now())
 
     # Relationships
     school_assignments = relationship("TeacherSchoolAssignment", back_populates="teacher")

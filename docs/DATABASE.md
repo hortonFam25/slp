@@ -126,10 +126,12 @@ $env:AUTH_REQUIRE_BEARER = "false"
 python backend/start_server.py
 ```
 
-The models carry `server_default=GETDATE()` on ~60 columns, which sqlite does
-not have. `seed_dev.py` (and `backend/tests/conftest.py`) install a
-sqlite-only statement shim that rewrites it to `CURRENT_TIMESTAMP`. It is
-scoped to the sqlite dialect; nothing else in the app's SQL is touched.
+Timestamp columns use `server_default=func.now()`, which SQLAlchemy renders per
+dialect (`CURRENT_TIMESTAMP` on both sqlite and SQL Server). Nothing needs a
+shim. They used to hard-code the SQL-Server-only `GETDATE()`, which made
+`create_all` on sqlite die with ``near "(": syntax error`` until both
+`seed_dev.py` and `backend/tests/conftest.py` rewrote it in flight; those hooks
+are gone.
 
 ---
 
@@ -242,9 +244,15 @@ alembic -c alembic.ini revision --autogenerate -m "what it does"
 ```
 
 Read the generated script. Autogenerate against sqlite will not get SQL Server
-right on its own — check types, server defaults (`GETDATE()`), and that
-constraint changes are wrapped in `batch_alter_table` the way
+right on its own — check types, server defaults, and that constraint changes
+are wrapped in `batch_alter_table` the way
 `c5a91b3e77d4_add_oauth_facade_tables.py` does.
+
+One known false positive: with `compare_server_default=True`, autogenerate may
+report a diff on timestamp columns deployed before the `func.now()` change,
+whose stored default is still literally `GETDATE()`. `CURRENT_TIMESTAMP` and
+`GETDATE()` are equivalent in T-SQL, so those are cosmetic — drop them from the
+script rather than applying them.
 
 ### 2. Rehearse on dev
 
@@ -319,6 +327,45 @@ only, as always.
 
 ---
 
+## Audit trail
+
+`therapy_session_audit_log` is the history of edits to therapy sessions and
+session objectives: one row per change, carrying `table_name` / `record_id` /
+`field_name`, the old and new values, the operation type, a timestamp, and the
+database login that made it. `change_reason` and `user_context` are only filled
+by `sp_LogTherapySessionChange`, which is called deliberately; the triggers
+leave them NULL. `field_name` is nullable because one trigger's INSERT list
+omits it — a whole-row operation names no single column.
+
+Nothing in the application writes to it. The writers are two SQL Server
+triggers,
+
+* `trg_therapy_sessions_audit_safe` on `therapy_sessions`
+* `trg_session_objectives_audit_safe` on `session_objectives`
+
+and the readers are `vw_recent_audit_changes` and `sp_GetStudentAuditHistory`.
+Triggers are also why the app's engine sets `implicit_returning=False`.
+
+**Triggers are SQL Server only.** On sqlite the table is created and stays
+empty — there is nothing to fire, and that is expected, not a broken dev
+environment.
+
+Restored 2026-08-20 by migration `b4e7a1c93d20`. A production catalog
+inventory found the system half-demolished: both triggers still present but
+`is_disabled = 1`, the table they insert into gone entirely, and the view and
+both procedures left referencing it. The likely sequence is that the table was
+dropped, the triggers then started failing, and someone disabled them to stop
+the errors — no migration recorded any of it, so nothing in the repository knew
+the table had ever existed. `b4e7a1c93d20` recreates the table with its indexes
+and re-enables each trigger, guarded on the mssql dialect and on the trigger
+being present in `sys.triggers`, so it is a clean no-op on `slpdb_dev` and on
+sqlite. There is now a model
+([`therapy_session_audit_log.py`](../backend/app/models/therapy_session_audit_log.py))
+as well, so `create_all` produces the table and it cannot silently go missing
+again.
+
+---
+
 ## The tools
 
 | File | What it is |
@@ -328,6 +375,7 @@ only, as always.
 | [`backend/scripts/grant_migration_identity.sql`](../backend/scripts/grant_migration_identity.sql) | The exact, minimal permissions the CI identity gets, with the reasoning for each. |
 | [`.github/workflows/migrate.yml`](../.github/workflows/migrate.yml) | The dispatch-only migration workflow. |
 | [`backend/tests/test_seed_dev.py`](../backend/tests/test_seed_dev.py) | The gate: the guards refuse production, the catalog-only rule holds across the whole module, and the seeder runs end to end on sqlite. |
+| [`backend/tests/test_audit_log_migration.py`](../backend/tests/test_audit_log_migration.py) | Covers `b4e7a1c93d20`: the ENABLE TRIGGER branch is driven through a stand-in bind, since no test may touch SQL Server. |
 
 ---
 

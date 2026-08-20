@@ -22,6 +22,9 @@ from app.models.block_assignment import BlockAssignment  # noqa: F401
 from app.models.therapy_session import TherapySession  # noqa: F401
 from app.models.session_goal import SessionGoal  # noqa: F401
 from app.models.session_objective import SessionObjective  # noqa: F401
+# Written by SQL Server triggers, never by the app — registered so the table
+# is schema-managed rather than hand-made. See the module docstring.
+from app.models.therapy_session_audit_log import TherapySessionAuditLog  # noqa: F401
 from app.models.ai_chat_session import AIChatSession  # noqa: F401
 from app.models.ai_chat_message import AIChatMessage  # noqa: F401
 from app.models.ai_saved_progress_note import AISavedProgressNote  # noqa: F401

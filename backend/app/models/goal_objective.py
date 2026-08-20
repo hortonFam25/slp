@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, UniqueConstraint, CheckConstraint, text
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, UniqueConstraint, CheckConstraint, func
 from sqlalchemy.orm import relationship
 from app.db.base import Base
 
@@ -12,8 +12,8 @@ class GoalObjective(Base):
     objective_description = Column(Text, nullable=False)
     progress_status = Column(String(50), nullable=True)
     schedule_frequency = Column(String(50), nullable=True)
-    created_date = Column(DateTime, nullable=False, server_default=text('GETDATE()'))
-    modified_date = Column(DateTime, nullable=False, server_default=text('GETDATE()'))
+    created_date = Column(DateTime, nullable=False, server_default=func.now())
+    modified_date = Column(DateTime, nullable=False, server_default=func.now())
 
     # Constraints
     __table_args__ = (

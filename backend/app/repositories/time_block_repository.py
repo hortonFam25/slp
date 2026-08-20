@@ -1,13 +1,19 @@
+import logging
 from datetime import datetime, date
 from typing import List, Optional
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import and_, or_, func
+from app.models.appointment import Appointment
 from app.models.time_block import TimeBlock
 from app.models.block_assignment import BlockAssignment
 from app.models.student import Student
 from app.models.teacher import Teacher
 from app.models.school import School
 from app.schemas.time_block import TimeBlockCreate, TimeBlockUpdate
+
+logger = logging.getLogger(__name__)
+
+_WEEKDAY_NAMES = ('Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun')
 
 
 class TimeBlockRepository:
@@ -79,7 +85,6 @@ class TimeBlockRepository:
 
     def get_time_block_appointments_by_series(self, time_block_id: int) -> dict:
         """Get all appointments for a time block grouped by series_id"""
-        from app.models.appointment import Appointment
         from sqlalchemy.orm import joinedload
         
         appointments = self.db.query(Appointment).options(
@@ -107,7 +112,6 @@ class TimeBlockRepository:
     def create_recurring_time_blocks(self, time_block_data: dict, student_ids: List[int], recurring_config: dict, activities_data: List[dict] = None) -> dict:
         """Create recurring time blocks with appointments for all assigned students"""
         from uuid import uuid4
-        from app.models.appointment import Appointment
         from app.models.therapy_session import TherapySession
         from datetime import datetime, timedelta
         
@@ -233,7 +237,11 @@ class TimeBlockRepository:
                 from app.models.activity_student_assignment import ActivityStudentAssignment
                 
                 for activity_data in activities_data:
-                    print(f"🔄 Creating activity '{activity_data.get('activity_name')}' for time block {time_block.id}")
+                    logger.debug(
+                        "Creating activity %r for time block %s",
+                        activity_data.get('activity_name'),
+                        time_block.id,
+                    )
                     
                     # Create activity (ignore the time_block_id from frontend, use the current time block)
                     activity = TimeBlockActivity(
@@ -358,7 +366,6 @@ class TimeBlockRepository:
 
     def update_time_block_series(self, series_id: str, update_data: dict) -> dict:
         """Update all time blocks in a series with smart time slot recalculation"""
-        from app.models.appointment import Appointment
         from app.models.therapy_session import TherapySession
         from uuid import uuid4
         
@@ -403,7 +410,7 @@ class TimeBlockRepository:
                 if abs(new_duration - old_duration) > 1:  # Allow 1-minute tolerance
                     needs_time_recalculation = True
         
-        print(f"🔄 Time Block Series Update - Needs time recalculation: {needs_time_recalculation}")
+        logger.debug("Time block series update: needs_time_recalculation=%s", needs_time_recalculation)
         
         # Update each time block and its appointments
         for time_block_id, block_appointments in time_block_groups.items():
@@ -499,12 +506,11 @@ class TimeBlockRepository:
 
     def update_time_block_series_pattern(self, series_id: str, pattern_data: dict) -> dict:
         """Update time block series with pattern changes (date shifts, day alignment)"""
-        from app.models.appointment import Appointment
         from app.models.therapy_session import TherapySession
         from datetime import timedelta
         
-        print(f"🔄 Time Block Series Pattern Update - Series ID: {series_id}")
-        print(f"🔄 Pattern data: {pattern_data}")
+        logger.info("Time block series pattern update for series %s", series_id)
+        logger.debug("Pattern data: %s", pattern_data)
         
         # Get all appointments in this series that belong to time blocks
         appointments = self.db.query(Appointment).options(
@@ -520,7 +526,7 @@ class TimeBlockRepository:
         if not appointments:
             return {"success": False, "message": "No time block appointments found for this series"}
         
-        print(f"🔄 Found {len(appointments)} appointments in series")
+        logger.debug("Found %d appointments in series", len(appointments))
         
         # Filter out completed/in-progress sessions
         editable_appointments = []
@@ -536,7 +542,7 @@ class TimeBlockRepository:
             if should_update:
                 editable_appointments.append(appointment)
         
-        print(f"🔄 Found {len(editable_appointments)} editable appointments")
+        logger.debug("Found %d editable appointments", len(editable_appointments))
         
         if not editable_appointments:
             return {"success": False, "message": "No editable appointments found in series"}
@@ -558,7 +564,11 @@ class TimeBlockRepository:
             if not time_block:
                 continue
             
-            print(f"🔄 Processing time block {time_block_id} with {len(block_appointments)} appointments")
+            logger.debug(
+                "Processing time block %s with %d appointments",
+                time_block_id,
+                len(block_appointments),
+            )
             
             # Calculate new time block date based on pattern
             update_type = pattern_data.get('update_type', 'day_alignment')
@@ -575,12 +585,17 @@ class TimeBlockRepository:
                 offset_days = pattern_data.get('date_offset_days', 0)
                 target_day = pattern_data.get('target_day_of_week', 1)  # Default to Monday
                 
-                print(f"🔍 Day alignment - offset_days: {offset_days}, target_day: {target_day}")
-                print(f"🔍 Original date: {time_block.start_datetime.date()}, weekday: {time_block.start_datetime.weekday()}")
+                logger.debug(
+                    "Day alignment: offset_days=%s, target_day=%s, original date %s (weekday %d)",
+                    offset_days,
+                    target_day,
+                    time_block.start_datetime.date(),
+                    time_block.start_datetime.weekday(),
+                )
                 
                 # Apply offset first
                 offset_date = time_block.start_datetime.date() + timedelta(days=offset_days)
-                print(f"🔍 After offset: {offset_date}, weekday: {offset_date.weekday()}")
+                logger.debug("After offset: %s (weekday %d)", offset_date, offset_date.weekday())
                 
                 # Find next occurrence of target day of week
                 current_day = offset_date.weekday()  # Monday = 0, Tuesday = 1, etc.
@@ -591,17 +606,27 @@ class TimeBlockRepository:
                 else:  # Monday=1 becomes 0, Tuesday=2 becomes 1, etc.
                     target_weekday = target_day - 1
                 
-                print(f"🔍 Current weekday: {current_day} ({['Mon','Tue','Wed','Thu','Fri','Sat','Sun'][current_day]})")
-                print(f"🔍 Target weekday: {target_weekday} ({['Mon','Tue','Wed','Thu','Fri','Sat','Sun'][target_weekday]})")
+                logger.debug(
+                    "Current weekday: %d (%s), target weekday: %d (%s)",
+                    current_day,
+                    _WEEKDAY_NAMES[current_day],
+                    target_weekday,
+                    _WEEKDAY_NAMES[target_weekday],
+                )
                 
                 days_to_add = (target_weekday - current_day) % 7
                 if days_to_add == 0 and current_day != target_weekday:
                     days_to_add = 7  # Move to next week if already on target day
                 
-                print(f"🔍 Days to add calculation: ({target_weekday} - {current_day}) % 7 = {days_to_add}")
                 
                 aligned_date = offset_date + timedelta(days=days_to_add)
-                print(f"🔍 Days to add: {days_to_add}, Final date: {aligned_date}")
+                logger.debug(
+                    "Days to add: (%d - %d) %% 7 = %d, final date: %s",
+                    target_weekday,
+                    current_day,
+                    days_to_add,
+                    aligned_date,
+                )
                 
                 # Keep original times
                 original_start_time = time_block.start_datetime.time()
@@ -632,7 +657,12 @@ class TimeBlockRepository:
                         microsecond=0
                     )
             
-            print(f"🔄 Time block {time_block_id}: {time_block.start_datetime} → {new_block_start}")
+            logger.debug(
+                "Time block %s: %s to %s",
+                time_block_id,
+                time_block.start_datetime,
+                new_block_start,
+            )
             
             # Update time block
             time_block.start_datetime = new_block_start
@@ -661,7 +691,12 @@ class TimeBlockRepository:
                 # Find the appointment for this student
                 appointment = next((apt for apt in block_appointments if apt.student_id == student.id), None)
                 if appointment:
-                    print(f"🔄 Updating appointment {appointment.id}: {appointment.start_datetime} → {new_start_time}")
+                    logger.debug(
+                        "Updating appointment %s: %s to %s",
+                        appointment.id,
+                        appointment.start_datetime,
+                        new_start_time,
+                    )
                     
                     appointment.start_datetime = new_start_time
                     appointment.end_datetime = new_end_time
@@ -684,7 +719,11 @@ class TimeBlockRepository:
         
         self.db.commit()
         
-        print(f"✅ Updated {len(updated_time_blocks)} time blocks and {len(updated_appointments)} appointments")
+        logger.info(
+            "Updated %d time blocks and %d appointments",
+            len(updated_time_blocks),
+            len(updated_appointments),
+        )
         
         return {
             "success": True,
@@ -697,7 +736,6 @@ class TimeBlockRepository:
 
     def assign_student_with_auto_scheduling(self, time_block_id: int, student_id: int, auto_create_appointments: bool = True) -> dict:
         """Assign student to time block and optionally auto-create appointments with time splitting"""
-        from app.models.appointment import Appointment
         from app.models.therapy_session import TherapySession
         from uuid import uuid4
         
@@ -855,7 +893,6 @@ class TimeBlockRepository:
 
     def delete_time_block(self, time_block_id: int) -> bool:
         """Delete a time block and all associated appointments, therapy sessions, goals, and objectives"""
-        from app.models.appointment import Appointment
         from app.models.therapy_session import TherapySession
         from app.models.session_goal import SessionGoal
         from app.models.session_objective import SessionObjective
@@ -865,7 +902,7 @@ class TimeBlockRepository:
         if not time_block:
             return False
         
-        print(f"🗑️ Deleting time block {time_block_id} and all associated appointments")
+        logger.info("Deleting time block %s and all associated appointments", time_block_id)
         
         # Get all appointments associated with this time block
         appointments = self.db.query(Appointment).filter(
@@ -873,7 +910,7 @@ class TimeBlockRepository:
         ).all()
         
         if appointments:
-            print(f"🗑️ Found {len(appointments)} appointments to delete")
+            logger.info("Found %d appointments to delete", len(appointments))
             
             # Use the appointment repository to properly delete each appointment
             # This ensures therapy sessions, goals, and objectives are also deleted
@@ -900,13 +937,13 @@ class TimeBlockRepository:
                 # Delete appointment
                 self.db.delete(appointment)
             
-            print(f"🗑️ Deleted {len(appointments)} appointments and their therapy data")
+            logger.info("Deleted %d appointments and their therapy data", len(appointments))
         
         # Delete the time block (block assignments and activities should cascade due to foreign key constraints)
         self.db.delete(time_block)
         self.db.commit()
         
-        print(f"✅ Successfully deleted time block {time_block_id}")
+        logger.info("Successfully deleted time block %s", time_block_id)
         return True
 
     def get_time_blocks_by_date_range(
