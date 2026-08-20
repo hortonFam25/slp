@@ -42,7 +42,17 @@ class JWTValidator:
         # The API scope this installation registered. Configurable (env:
         # AAD_API_AUDIENCE) but defaulted to the existing registration, so a
         # deployment that sets nothing keeps working.
+        #
+        # BOTH spellings are accepted deliberately: Entra v1 access tokens
+        # carry aud = the App ID URI ("api://<guid>"), v2 tokens carry aud =
+        # the bare client-id GUID for the same registration. Accepting only
+        # one form couples this validator to the app registration's
+        # requestedAccessTokenVersion, and flipping that setting would 401
+        # every caller.
         self.audience = settings.aad_api_audience
+        self.audiences = [self.audience]
+        if self.audience.startswith("api://"):
+            self.audiences.append(self.audience.removeprefix("api://"))
 
         # Initialize JWKS client for key retrieval. Constructing it fetches
         # nothing; the first validated token does.
@@ -59,7 +69,7 @@ class JWTValidator:
                 token,
                 signing_key.key,
                 algorithms=["RS256"],
-                audience=self.audience,
+                audience=self.audiences,
                 issuer=self.issuer,
                 options={
                     "verify_signature": True,
