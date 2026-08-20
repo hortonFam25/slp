@@ -251,13 +251,21 @@ export default function Students() {
   ).length;
 
   return (
-    <Stack spacing={isMobile ? 2 : 3} sx={{ p: isMobile ? 2 : 0 }}>
+    <Stack
+      spacing={2}
+      sx={{ p: { xs: 1.5, sm: 2 }, height: '100%', minHeight: 0, overflow: 'hidden' }}
+    >
       <Box sx={{
         display: 'flex',
         flexDirection: isMobile ? 'column' : 'row',
         gap: isMobile ? 2 : 3,
         justifyContent: 'space-between',
-        alignItems: isMobile ? 'stretch' : 'center'
+        alignItems: isMobile ? 'stretch' : 'center',
+        position: 'sticky',
+        top: 0,
+        zIndex: 2,
+        bgcolor: 'background.default',
+        pt: 0.25,
       }}>
         <Box sx={{ 
           display: 'flex', 
@@ -265,20 +273,21 @@ export default function Students() {
           alignItems: isMobile ? 'center' : 'center',
           gap: isMobile ? 2 : 3
         }}>
-          <Typography 
-            variant={isMobile ? 'h5' : 'h4'} 
-            component="h1" 
-            sx={{ 
+          <Typography
+            component="h1"
+            sx={{
               textAlign: isMobile ? 'center' : 'left',
               color: '#41AAB7',
               fontWeight: 700,
               display: 'flex',
               alignItems: 'center',
-              gap: 2,
-              justifyContent: isMobile ? 'center' : 'flex-start'
+              gap: 1.25,
+              justifyContent: isMobile ? 'center' : 'flex-start',
+              fontSize: { xs: '1.35rem', sm: '1.5rem' },
+              lineHeight: 1.2,
             }}
           >
-            <UsersRound size={isMobile ? 28 : 32} />
+            <UsersRound size={24} />
             Students
           </Typography>
           
@@ -392,8 +401,9 @@ export default function Students() {
         </Alert>
       )}
 
-      <Stack spacing={isMobile ? 1.5 : 2}>
-        {students.map((student) => (
+      <Box sx={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
+        <Stack spacing={isMobile ? 1.5 : 2}>
+          {students.map((student) => (
           <Card key={student.id} variant="outlined" sx={{ 
             border: isMobile ? '1px solid #e0e0e0' : undefined,
             boxShadow: isMobile ? '0 1px 3px rgba(0,0,0,0.1)' : undefined
@@ -552,18 +562,19 @@ export default function Students() {
               </Stack>
             </CardContent>
           </Card>
-        ))}
-        
-        {students.length === 0 && !loading && (
-          <Card variant="outlined">
-            <CardContent>
-              <Typography color="text.secondary" textAlign="center">
-                No students found. Click "Add Student" to get started.
-              </Typography>
-            </CardContent>
-          </Card>
-        )}
-      </Stack>
+          ))}
+          
+          {students.length === 0 && !loading && (
+            <Card variant="outlined">
+              <CardContent>
+                <Typography color="text.secondary" textAlign="center">
+                  No students found. Click "Add Student" to get started.
+                </Typography>
+              </CardContent>
+            </Card>
+          )}
+        </Stack>
+      </Box>
 
       {/* Create Student Dialog */}
       <Dialog 

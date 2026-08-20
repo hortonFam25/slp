@@ -5,6 +5,8 @@ from sqlalchemy.orm import Session
 from sqlalchemy import and_, or_
 
 from app.db.database import get_db
+from app.dependencies.access_control import ensure_appointment_access
+from app.dependencies.auth import AuthContext, ensure_student_access, get_auth_context
 from app.repositories.appointment_repository import AppointmentRepository
 from app.repositories.time_block_repository import TimeBlockRepository
 from app.repositories.time_block_activity_repository import TimeBlockActivityRepository
@@ -25,13 +27,54 @@ from app.schemas.time_block import (
 from app.schemas.scheduling_student import (
     StudentScheduleView, StudentScheduleFilters
 )
+from app.schemas.student import StudentSummary
 from app.schemas.block_assignment import (
     BlockAssignmentCreate, BlockAssignmentRead, BlockAssignmentUpdate,
     BlockAssignmentSummary
 )
 
 
-router = APIRouter(prefix="/api/scheduling", tags=["scheduling"])
+router = APIRouter(prefix="/api/scheduling", tags=["scheduling"], dependencies=[Depends(get_auth_context)])
+
+
+def _should_mask_student_names(auth: AuthContext) -> bool:
+    return auth.is_admin or auth.user.id != auth.effective_user.id
+
+
+def _student_alias_value(student) -> str:
+    return getattr(student, "student_alias", None) or f"student_{student.id}"
+
+
+def _student_display_name(student, auth: AuthContext) -> str:
+    if student is None:
+        return "Unknown"
+    if _should_mask_student_names(auth):
+        return _student_alias_value(student)
+    return student.full_name
+
+
+def _student_name_parts(student, auth: AuthContext) -> tuple[str, str]:
+    if _should_mask_student_names(auth):
+        return _student_alias_value(student), ""
+    return student.first, student.last
+
+
+def _student_summary_for_response(student, auth: AuthContext) -> StudentSummary:
+    first, last = _student_name_parts(student, auth)
+    return StudentSummary(
+        id=student.id,
+        student_alias=student.student_alias or f"student_{student.id}",
+        first=first,
+        last=last,
+        uic=student.uic,
+        grade_level=student.grade_level,
+        enrollment_status=student.enrollment_status,
+        school_id=student.school_id,
+        teacher_id=student.teacher_id,
+        case_manager_id=student.case_manager_id,
+        teacher=student.teacher,
+        case_manager=student.case_manager,
+    )
 
 
 # Appointment endpoints
@@ -44,9 +87,12 @@ def get_appointments(
     school_id: Optional[int] = Query(None, description="Filter by school ID"),
     appointment_type: Optional[str] = Query(None, description="Filter by appointment type"),
     status: Optional[str] = Query(None, description="Filter by status"),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """Get appointments within a date range with optional filters"""
+    if student_id is not None:
+        ensure_student_access(auth, student_id, action="list appointments for student")
     repo = AppointmentRepository(db)
     appointments = repo.get_appointments_by_date_range(
         start_date=start_date,
@@ -58,13 +104,16 @@ def get_appointments(
         status=status
     )
     
+    if auth.enforce_access and not auth.is_admin:
+        appointments = [a for a in appointments if a.student_id in auth.allowed_student_ids]
+
     # Convert to summary format
     summaries = []
     for apt in appointments:
         summary = AppointmentSummary(
             id=apt.id,
             student_id=apt.student_id,
-            student_name=apt.student.full_name if apt.student else "Unknown",
+            student_name=_student_display_name(apt.student, auth),
             teacher_id=apt.teacher_id,
             teacher_name=apt.teacher.full_name if apt.teacher else None,
             school_id=apt.school_id,
@@ -85,17 +134,22 @@ def get_appointments(
 
 
 @router.get("/appointments/{appointment_id}", response_model=AppointmentWithDetails)
-def get_appointment(appointment_id: int, db: Session = Depends(get_db)):
+def get_appointment(
+    appointment_id: int,
+    db: Session = Depends(get_db),
+    auth: AuthContext = Depends(get_auth_context),
+):
     """Get a specific appointment with details"""
     repo = AppointmentRepository(db)
     appointment = repo.get_appointment(appointment_id)
     
     if not appointment:
         raise HTTPException(status_code=404, detail="Appointment not found")
+    ensure_appointment_access(db, auth, appointment_id)
     
     return AppointmentWithDetails(
         **appointment.__dict__,
-        student_name=appointment.student.full_name if appointment.student else "Unknown",
+        student_name=_student_display_name(appointment.student, auth),
         teacher_name=appointment.teacher.full_name if appointment.teacher else None,
         school_name=appointment.school.name if appointment.school else None,
         duration_minutes=appointment.duration_minutes,
@@ -104,8 +158,13 @@ def get_appointment(appointment_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/appointments", response_model=AppointmentRead)
-def create_appointment(appointment_data: AppointmentCreate, db: Session = Depends(get_db)):
+def create_appointment(
+    appointment_data: AppointmentCreate,
+    db: Session = Depends(get_db),
+    auth: AuthContext = Depends(get_auth_context),
+):
     """Create a new appointment"""
+    ensure_student_access(auth, appointment_data.student_id, action="create appointment")
     repo = AppointmentRepository(db)
     
     # Check for time conflicts
@@ -124,8 +183,13 @@ def create_appointment(appointment_data: AppointmentCreate, db: Session = Depend
 
 
 @router.post("/appointments/recurring", response_model=RecurringAppointmentResponse)
-def create_recurring_appointments(recurring_data: RecurringAppointmentCreate, db: Session = Depends(get_db)):
+def create_recurring_appointments(
+    recurring_data: RecurringAppointmentCreate,
+    db: Session = Depends(get_db),
+    auth: AuthContext = Depends(get_auth_context),
+):
     """Create recurring appointments with therapy sessions, goals, and objectives"""
+    ensure_student_access(auth, recurring_data.student_id, action="create recurring appointments")
     repo = AppointmentRepository(db)
     
     result = repo.create_recurring_appointments(recurring_data)
@@ -142,10 +206,12 @@ def create_recurring_appointments(recurring_data: RecurringAppointmentCreate, db
 def update_appointment(
     appointment_id: int, 
     appointment_data: AppointmentUpdate, 
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """Update an appointment"""
     repo = AppointmentRepository(db)
+    ensure_appointment_access(db, auth, appointment_id)
     
     # If updating time, check for conflicts
     if appointment_data.start_datetime or appointment_data.end_datetime:
@@ -179,9 +245,14 @@ def update_appointment(
 
 
 @router.delete("/appointments/{appointment_id}")
-def delete_appointment(appointment_id: int, db: Session = Depends(get_db)):
+def delete_appointment(
+    appointment_id: int,
+    db: Session = Depends(get_db),
+    auth: AuthContext = Depends(get_auth_context),
+):
     """Delete an appointment"""
     repo = AppointmentRepository(db)
+    ensure_appointment_access(db, auth, appointment_id)
     
     try:
         success = repo.delete_appointment(appointment_id)
@@ -309,9 +380,11 @@ def get_student_appointments(
     student_id: int,
     start_date: Optional[date] = Query(None, description="Start date filter"),
     end_date: Optional[date] = Query(None, description="End date filter"),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """Get all appointments for a specific student"""
+    ensure_student_access(auth, student_id, action="get student appointments")
     repo = AppointmentRepository(db)
     appointments = repo.get_student_appointments(student_id, start_date, end_date)
     
@@ -320,7 +393,7 @@ def get_student_appointments(
         summary = AppointmentSummary(
             id=apt.id,
             student_id=apt.student_id,
-            student_name=apt.student.full_name if apt.student else "Unknown",
+            student_name=_student_display_name(apt.student, auth),
             teacher_id=apt.teacher_id,
             teacher_name=apt.teacher.full_name if apt.teacher else None,
             school_id=apt.school_id,
@@ -347,9 +420,11 @@ def get_available_slots(
     duration_minutes: int = Query(30, description="Duration of appointment in minutes"),
     start_hour: int = Query(8, description="Start hour for time slots"),
     end_hour: int = Query(17, description="End hour for time slots"),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """Get available time slots for a student on a given date"""
+    ensure_student_access(auth, student_id, action="get available slots")
     repo = AppointmentRepository(db)
     slots = repo.get_available_time_slots(
         student_id=student_id,
@@ -420,7 +495,11 @@ def get_time_blocks(
 
 
 @router.get("/time-blocks/{time_block_id}", response_model=TimeBlockWithStudents)
-def get_time_block(time_block_id: int, db: Session = Depends(get_db)):
+def get_time_block(
+    time_block_id: int,
+    db: Session = Depends(get_db),
+    auth: AuthContext = Depends(get_auth_context),
+):
     """Get a specific time block with student details"""
     repo = TimeBlockRepository(db)
     time_block = repo.get_time_block(time_block_id)
@@ -428,21 +507,8 @@ def get_time_block(time_block_id: int, db: Session = Depends(get_db)):
     if not time_block:
         raise HTTPException(status_code=404, detail="Time block not found")
     
-    from app.schemas.student import StudentSummary
     assigned_students = [
-        StudentSummary(
-            id=assignment.student.id,
-            first=assignment.student.first,
-            last=assignment.student.last,
-            uic=assignment.student.uic,
-            grade_level=assignment.student.grade_level,
-            enrollment_status=assignment.student.enrollment_status,
-            school_id=assignment.student.school_id,
-            teacher_id=assignment.student.teacher_id,
-            case_manager_id=assignment.student.case_manager_id,
-            teacher=assignment.student.teacher,
-            case_manager=assignment.student.case_manager
-        )
+        _student_summary_for_response(assignment.student, auth)
         for assignment in time_block.block_assignments
         if assignment.status == 'assigned'
     ]
@@ -672,9 +738,11 @@ def assign_student_to_block(
     time_block_id: int, 
     student_id: int,
     auto_create_appointments: bool = Query(True, description="Automatically create appointments with time splitting"),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """Assign a student to a time block with optional automatic appointment creation"""
+    ensure_student_access(auth, student_id, action="assign student to time block")
     repo = TimeBlockRepository(db)
     
     if auto_create_appointments:
@@ -695,27 +763,15 @@ def assign_student_to_block(
 @router.get("/time-blocks/{time_block_id}/eligible-students")
 def get_eligible_students_for_time_block(
     time_block_id: int,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """Get students eligible for assignment to this time block based on teacher/case manager"""
     repo = TimeBlockRepository(db)
     students = repo.get_eligible_students_for_time_block(time_block_id)
     
-    from app.schemas.student import StudentSummary
     return [
-        StudentSummary(
-            id=student.id,
-            first=student.first,
-            last=student.last,
-            uic=student.uic,
-            grade_level=student.grade_level,
-            enrollment_status=student.enrollment_status,
-            school_id=student.school_id,
-            teacher_id=student.teacher_id,
-            case_manager_id=student.case_manager_id,
-            teacher=student.teacher,
-            case_manager=student.case_manager
-        )
+        _student_summary_for_response(student, auth)
         for student in students
     ]
 
@@ -723,7 +779,8 @@ def get_eligible_students_for_time_block(
 @router.get("/students/by-teacher/{teacher_id}")
 def get_students_by_teacher_or_case_manager(
     teacher_id: int,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """Get students who have this person as either teacher or case manager"""
     from app.models.student import Student
@@ -744,21 +801,8 @@ def get_students_by_teacher_or_case_manager(
         )
     ).order_by(Student.last, Student.first).all()
     
-    from app.schemas.student import StudentSummary
     return [
-        StudentSummary(
-            id=student.id,
-            first=student.first,
-            last=student.last,
-            uic=student.uic,
-            grade_level=student.grade_level,
-            enrollment_status=student.enrollment_status,
-            school_id=student.school_id,
-            teacher_id=student.teacher_id,
-            case_manager_id=student.case_manager_id,
-            teacher=student.teacher,
-            case_manager=student.case_manager
-        )
+        _student_summary_for_response(student, auth)
         for student in students
     ]
 
@@ -768,9 +812,11 @@ def remove_student_from_block(
     time_block_id: int, 
     student_id: int,
     auto_update_appointments: bool = Query(True, description="Automatically recalculate remaining appointments"),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """Remove a student from a time block with optional automatic appointment rescheduling"""
+    ensure_student_access(auth, student_id, action="remove student from time block")
     repo = TimeBlockRepository(db)
     
     if auto_update_appointments:
@@ -801,7 +847,8 @@ def get_students_for_scheduling(
     start_date: Optional[str] = Query(None, description="Start date for appointment filtering (YYYY-MM-DD)"),
     end_date: Optional[str] = Query(None, description="End date for appointment filtering (YYYY-MM-DD)"),
     has_appointments: Optional[bool] = Query(None, description="Filter by appointment status (true=scheduled, false=unscheduled)"),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """Get students with comprehensive data for scheduling functionality"""
     filters = StudentScheduleFilters(
@@ -815,21 +862,31 @@ def get_students_for_scheduling(
     )
     
     repo = SchedulingStudentRepository(db)
-    return repo.get_students_for_scheduling(filters)
+    students = repo.get_students_for_scheduling(filters)
+    if _should_mask_student_names(auth):
+        for student in students:
+            student.first = student.student_alias
+            student.last = ""
+    return students
 
 
 @router.get("/students/{student_id}", response_model=StudentScheduleView)
 def get_student_for_scheduling(
     student_id: int,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """Get a single student with comprehensive scheduling data"""
+    ensure_student_access(auth, student_id, action="get student scheduling view")
     repo = SchedulingStudentRepository(db)
     student = repo.get_student_for_scheduling(student_id)
     
     if not student:
         raise HTTPException(status_code=404, detail="Student not found")
     
+    if _should_mask_student_names(auth):
+        student.first = student.student_alias
+        student.last = ""
     return student
 
 
@@ -838,7 +895,11 @@ def get_student_for_scheduling(
 # =====================================
 
 @router.get("/time-blocks/{time_block_id}/activities")
-def get_time_block_activities(time_block_id: int, db: Session = Depends(get_db)):
+def get_time_block_activities(
+    time_block_id: int,
+    db: Session = Depends(get_db),
+    auth: AuthContext = Depends(get_auth_context),
+):
     """Get all activities for a time block"""
     repo = TimeBlockActivityRepository(db)
     raw_activities = repo.get_activities_by_time_block(time_block_id)
@@ -850,11 +911,12 @@ def get_time_block_activities(time_block_id: int, db: Session = Depends(get_db))
         if hasattr(activity, 'student_assignments'):
             for assignment in activity.student_assignments:
                 if assignment.status == 'assigned' and assignment.student:
+                    first, last = _student_name_parts(assignment.student, auth)
                     assigned_students.append({
                         "id": assignment.student.id,
-                        "first": assignment.student.first,
-                        "last": assignment.student.last,
-                        "full_name": f"{assignment.student.first} {assignment.student.last}"
+                        "first": first,
+                        "last": last,
+                        "full_name": _student_display_name(assignment.student, auth)
                     })
         
         activity_dict = {
@@ -919,7 +981,8 @@ def update_time_block_activity(
     time_block_id: int,
     activity_id: int,
     activity_data: TimeBlockActivityUpdate,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """Update a time block activity"""
     repo = TimeBlockActivityRepository(db)
@@ -954,11 +1017,12 @@ def update_time_block_activity(
     if hasattr(activity, 'student_assignments'):
         for assignment in activity.student_assignments:
             if assignment.status == 'assigned' and assignment.student:
+                first, last = _student_name_parts(assignment.student, auth)
                 assigned_students.append({
                     "id": assignment.student.id,
-                    "first": assignment.student.first,
-                    "last": assignment.student.last,
-                    "full_name": f"{assignment.student.first} {assignment.student.last}"
+                    "first": first,
+                    "last": last,
+                    "full_name": _student_display_name(assignment.student, auth)
                 })
     
     return {
@@ -1070,7 +1134,8 @@ def cancel_time_block_schedule(
 @router.get("/time-blocks/{time_block_id}/appointments")
 def get_time_block_appointments(
     time_block_id: int,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """Get all appointments for a time block"""
     service = TimeBlockSchedulingService(db)
@@ -1080,7 +1145,7 @@ def get_time_block_appointments(
         {
             "id": apt.id,
             "student_id": apt.student_id,
-            "student_name": f"{apt.student.first} {apt.student.last}",
+            "student_name": _student_display_name(apt.student, auth),
             "start_datetime": apt.start_datetime,
             "end_datetime": apt.end_datetime,
             "status": apt.status,
@@ -1095,7 +1160,8 @@ def get_time_block_appointments(
 @router.get("/time-blocks/{time_block_id}/student-goals")
 def get_time_block_student_goals(
     time_block_id: int,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """Get student goal assignments for a time block"""
     from app.models.session_goal import SessionGoal
@@ -1118,7 +1184,7 @@ def get_time_block_student_goals(
             if student_id not in student_goals:
                 student_goals[student_id] = {
                     "student_id": student_id,
-                    "student_name": f"{appointment.student.first} {appointment.student.last}",
+                    "student_name": _student_display_name(appointment.student, auth),
                     "goals": [],
                     "objectives": []
                 }
@@ -1138,9 +1204,12 @@ def get_time_block_student_goals(
 
 # Enhanced time block detail with activities
 @router.get("/time-blocks/{time_block_id}/detailed")
-def get_time_block_with_activities(time_block_id: int, db: Session = Depends(get_db)):
+def get_time_block_with_activities(
+    time_block_id: int,
+    db: Session = Depends(get_db),
+    auth: AuthContext = Depends(get_auth_context),
+):
     """Get a time block with students and activities"""
-    from app.schemas.student import StudentSummary
     
     # Get time block
     time_block_repo = TimeBlockRepository(db)
@@ -1160,11 +1229,12 @@ def get_time_block_with_activities(time_block_id: int, db: Session = Depends(get
         if hasattr(activity, 'student_assignments'):
             for assignment in activity.student_assignments:
                 if assignment.status == 'assigned' and assignment.student:
+                    first, last = _student_name_parts(assignment.student, auth)
                     assigned_students.append({
                         "id": assignment.student.id,
-                        "first": assignment.student.first,
-                        "last": assignment.student.last,
-                        "full_name": f"{assignment.student.first} {assignment.student.last}"
+                        "first": first,
+                        "last": last,
+                        "full_name": _student_display_name(assignment.student, auth)
                     })
         
         activity_dict = {
@@ -1190,19 +1260,7 @@ def get_time_block_with_activities(time_block_id: int, db: Session = Depends(get
     
     # Get assigned students
     assigned_students = [
-        StudentSummary(
-            id=assignment.student.id,
-            first=assignment.student.first,
-            last=assignment.student.last,
-            uic=assignment.student.uic,
-            grade_level=assignment.student.grade_level,
-            enrollment_status=assignment.student.enrollment_status,
-            school_id=assignment.student.school_id,
-            teacher_id=assignment.student.teacher_id,
-            case_manager_id=assignment.student.case_manager_id,
-            teacher=assignment.student.teacher,
-            case_manager=assignment.student.case_manager
-        )
+        _student_summary_for_response(assignment.student, auth)
         for assignment in time_block.block_assignments
         if assignment.status == 'assigned'
     ]
@@ -1227,9 +1285,11 @@ def assign_student_to_activity(
     time_block_id: int,
     activity_id: int,
     student_id: int,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """Assign a student to a time block activity"""
+    ensure_student_access(auth, student_id, action="assign student to activity")
     repo = TimeBlockActivityRepository(db)
     
     # Verify the activity belongs to the time block
@@ -1249,9 +1309,11 @@ def remove_student_from_activity(
     time_block_id: int,
     activity_id: int,
     student_id: int,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """Remove a student from a time block activity"""
+    ensure_student_access(auth, student_id, action="remove student from activity")
     repo = TimeBlockActivityRepository(db)
     
     # Verify the activity belongs to the time block

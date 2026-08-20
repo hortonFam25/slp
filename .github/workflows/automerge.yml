@@ -1,0 +1,119 @@
+name: automerge
+
+# Label-gated auto-merge. This repo has no branch protection and no native
+# "auto-merge" button to lean on: this workflow IS the gate. It runs after CI
+# finishes and squash-merges any open, same-repo PR sitting at that exact commit
+# which carries the "automerge" label.
+#
+# The label has to exist in the repo before it can be applied — create it once:
+#   Settings -> Issues -> Labels -> New label, named exactly "automerge".
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+
+permissions:
+  contents: write
+  pull-requests: write
+  # Needed only for the deploy hand-off at the end — see the comment there.
+  actions: write
+
+jobs:
+  merge:
+    name: merge
+    runs-on: ubuntu-latest
+    if: github.event.workflow_run.conclusion == 'success'
+    steps:
+      - name: Squash-merge labelled PRs at this commit
+        id: merge
+        uses: actions/github-script@v7
+        with:
+          script: |
+            // Declared up front so the deploy hand-off below can never read an
+            // empty output on one of the early returns.
+            core.setOutput('merged', '0');
+
+            const sha = context.payload.workflow_run.head_sha;
+            const { owner, repo } = context.repo;
+            core.info(`CI succeeded for ${sha}`);
+
+            const associated = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+              owner, repo, commit_sha: sha,
+            });
+            if (associated.data.length === 0) {
+              core.info(`SKIP: no pull request is associated with ${sha}.`);
+              return;
+            }
+
+            let merged = 0;
+            for (const brief of associated.data) {
+              // The association payload is a summary; re-read the PR so labels,
+              // draft state and mergeability are current.
+              const { data: pr } = await github.rest.pulls.get({
+                owner, repo, pull_number: brief.number,
+              });
+              const tag = `PR #${pr.number} "${pr.title}"`;
+
+              if (pr.state !== 'open') {
+                core.info(`SKIP ${tag}: state is "${pr.state}", not open.`);
+                continue;
+              }
+              if (pr.draft) {
+                core.info(`SKIP ${tag}: still a draft.`);
+                continue;
+              }
+              const labels = pr.labels.map(l => l.name);
+              if (!labels.includes('automerge')) {
+                core.info(`SKIP ${tag}: no "automerge" label ` +
+                          `(labels: ${labels.join(', ') || 'none'}).`);
+                continue;
+              }
+              const headRepo = pr.head.repo ? pr.head.repo.full_name : '(deleted)';
+              if (headRepo !== pr.base.repo.full_name) {
+                core.info(`SKIP ${tag}: head is a fork (${headRepo}). A fork's ` +
+                          `PR is never auto-merged — review and merge it by hand.`);
+                continue;
+              }
+              if (pr.head.sha !== sha) {
+                core.info(`SKIP ${tag}: head has moved on (${pr.head.sha}) since ` +
+                          `CI ran on ${sha}. The new commit gets its own CI run.`);
+                continue;
+              }
+              if (pr.mergeable === false) {
+                core.info(`SKIP ${tag}: GitHub reports it is not mergeable ` +
+                          `(state "${pr.mergeable_state}") — conflicts need a human.`);
+                continue;
+              }
+
+              try {
+                await github.rest.pulls.merge({
+                  owner, repo,
+                  pull_number: pr.number,
+                  merge_method: 'squash',
+                  sha: pr.head.sha,
+                  commit_title: `${pr.title} (#${pr.number})`,
+                });
+                core.info(`MERGED ${tag} (squash).`);
+                merged += 1;
+              } catch (err) {
+                core.setFailed(`FAILED to merge ${tag}: ${err.status || ''} ${err.message}`);
+              }
+            }
+            core.setOutput('merged', String(merged));
+            core.info(`done: ${merged} pull request(s) merged.`);
+
+      # A push made with GITHUB_TOKEN does NOT start another workflow run —
+      # GitHub suppresses it to stop workflows recursing. So the squash above
+      # will never fire deploy.yml's `on: push` trigger, and the deploy has to
+      # be asked for explicitly. workflow_dispatch is the documented exception:
+      # it CAN be started with GITHUB_TOKEN.
+      - name: Ask deploy.yml to ship main
+        if: steps.merge.outputs.merged != '0'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            await github.rest.actions.createWorkflowDispatch({
+              owner, repo, workflow_id: 'deploy.yml', ref: 'main',
+            });
+            core.info('deploy.yml dispatched on main.');

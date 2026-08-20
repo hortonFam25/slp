@@ -21,6 +21,7 @@ interface ConfirmationModalProps {
   cancelText?: string;
   severity?: 'warning' | 'error' | 'info';
   loading?: boolean;
+  loadingText?: string;
 }
 
 export function ConfirmationModal({
@@ -32,7 +33,8 @@ export function ConfirmationModal({
   confirmText = 'Confirm',
   cancelText = 'Cancel',
   severity = 'warning',
-  loading = false
+  loading = false,
+  loadingText = 'Processing...'
 }: ConfirmationModalProps) {
   const getIconColor = () => {
     switch (severity) {
@@ -109,7 +111,7 @@ export function ConfirmationModal({
           disabled={loading}
           sx={{ minWidth: 100 }}
         >
-          {loading ? 'Deleting...' : confirmText}
+          {loading ? loadingText : confirmText}
         </Button>
       </DialogActions>
     </Dialog>

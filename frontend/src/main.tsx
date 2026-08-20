@@ -7,7 +7,14 @@ import { Toaster } from 'react-hot-toast';
 import { MsalProvider } from '@azure/msal-react';
 import { PublicClientApplication, EventType, AccountInfo } from '@azure/msal-browser';
 import App from './App';
+import { capturePendingConsent } from './lib/auth/pendingConsent';
 import './index.css';
+
+// BEFORE MSAL touches the URL: if this load is a connector consent request,
+// remember its query string. Entra returns to the bare origin and the OAuth
+// parameters cannot be reconstructed, so a request that is not stashed here is
+// a connector that fails with nothing to explain it.
+capturePendingConsent();
 
 const msalInstance = new PublicClientApplication({
   auth: {
@@ -20,6 +27,8 @@ const msalInstance = new PublicClientApplication({
     storeAuthStateInCookie: false,
   }
 });
+
+(window as unknown as { __msalInstance?: PublicClientApplication }).__msalInstance = msalInstance;
 
 // Handle redirects immediately when app loads
 msalInstance.handleRedirectPromise().then((response) => {

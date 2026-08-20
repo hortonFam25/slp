@@ -26,6 +26,7 @@ class Teacher(Base):
     student_assignments = relationship("StudentTeacherAssignment", back_populates="teacher")
     appointments = relationship("Appointment", back_populates="teacher")
     time_blocks = relationship("TimeBlock", back_populates="teacher")
+    teacher_roles = relationship("TeacherRole", back_populates="teacher", cascade="all, delete-orphan")
     
     # New direct student relationships
     students_as_teacher = relationship("Student", foreign_keys="Student.teacher_id", back_populates="teacher")
@@ -46,8 +47,20 @@ class Teacher(Base):
     @property
     def current_schools(self) -> list:
         """List of schools where teacher is currently assigned"""
-        return [assignment.school for assignment in self.school_assignments 
-                if assignment.end_date is None and assignment.school.is_active]
+        assigned_schools = [
+            assignment.school
+            for assignment in self.school_assignments
+            if assignment.end_date is None and assignment.school and assignment.school.is_active
+        ]
+        if assigned_schools:
+            return assigned_schools
+
+        # Fallback for direct student-school mappings when explicit school assignments are not used.
+        schools_by_id = {}
+        for student in self.current_students:
+            if student.school and student.school.is_active:
+                schools_by_id[student.school.id] = student.school
+        return list(schools_by_id.values())
 
     @property
     def primary_school(self):
@@ -59,8 +72,22 @@ class Teacher(Base):
     @property
     def current_students(self) -> list:
         """List of students currently assigned to this teacher"""
-        return [assignment.student for assignment in self.student_assignments 
-                if assignment.end_date is None and assignment.student.enrollment_status == 'Active']
+        students_by_id = {}
+
+        for student in self.students_as_teacher:
+            if student and student.enrollment_status == "Active" and not student.is_archived:
+                students_by_id[student.id] = student
+
+        for student in self.students_as_case_manager:
+            if student and student.enrollment_status == "Active" and not student.is_archived:
+                students_by_id[student.id] = student
+
+        # Legacy compatibility path for records still using assignment rows.
+        for assignment in self.student_assignments:
+            if assignment.end_date is None and assignment.student and assignment.student.enrollment_status == "Active":
+                students_by_id[assignment.student.id] = assignment.student
+
+        return list(students_by_id.values())
 
     @property
     def current_students_count(self) -> int:
@@ -82,3 +109,8 @@ class Teacher(Base):
     def active_schools_count(self) -> int:
         """Count of current school assignments"""
         return len(self.current_schools)
+
+    @property
+    def roles(self) -> list:
+        """List of assigned role entities"""
+        return [teacher_role.role for teacher_role in self.teacher_roles if teacher_role.role and teacher_role.role.is_active]

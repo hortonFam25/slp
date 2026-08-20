@@ -119,9 +119,9 @@ export interface UpdateStudentRequest {
   initial_evaluation_date?: string;
   eligibility_determination_date?: string;
   // School and teacher assignments
-  school_id?: number;
-  teacher_id?: number;
-  case_manager_id?: number;
+  school_id?: number | null;
+  teacher_id?: number | null;
+  case_manager_id?: number | null;
 }
 
 export interface StudentsFilters {

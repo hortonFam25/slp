@@ -5,6 +5,7 @@ import {
   Typography, 
   Box, 
   IconButton, 
+  Button,
   Chip, 
   Avatar,
   Paper,
@@ -25,7 +26,8 @@ import {
   AccessTime,
   Assignment,
   School,
-  CalendarToday
+  CalendarToday,
+  Timeline
 } from '@mui/icons-material';
 import { format, addDays, subDays, isSameDay, startOfDay } from 'date-fns';
 import { useNavigate } from 'react-router-dom';
@@ -33,6 +35,7 @@ import { useAppointments } from '../../../lib/hooks/useScheduling';
 import { useStartTherapySession } from '../../../lib/hooks/useTherapySessions';
 import { AppointmentSummary } from '../../../lib/api/scheduling';
 import { StartSessionRequest } from '../../../lib/api/therapySessions';
+import { StudentTherapyHistoryDialog } from '../../../components/StudentTherapyHistoryDialog';
 
 interface DailyScheduleViewProps {
   className?: string;
@@ -47,6 +50,10 @@ interface DayAppointment extends AppointmentSummary {
 
 export function DailyScheduleView({ className, onAppointmentSelect }: DailyScheduleViewProps) {
   const [selectedDate, setSelectedDate] = useState(new Date());
+  const [therapyHistoryStudent, setTherapyHistoryStudent] = useState<{
+    id: number;
+    name: string;
+  } | null>(null);
   const navigate = useNavigate();
   const theme = useTheme();
   const isMobile = useMediaQuery(theme.breakpoints.down('sm'));
@@ -300,7 +307,13 @@ export function DailyScheduleView({ className, onAppointmentSelect }: DailySched
                 <Paper
                   key={appointment.id}
                   elevation={1}
-                  onClick={() => onAppointmentSelect?.(appointment)}
+                  onClick={(event) => {
+                    const target = event.target as HTMLElement;
+                    if (target.closest('button, a, input, textarea, select, [role="button"]')) {
+                      return;
+                    }
+                    onAppointmentSelect?.(appointment);
+                  }}
                   sx={{
                     p: isMobile ? 1.5 : 2,
                     border: '1px solid',
@@ -459,16 +472,42 @@ export function DailyScheduleView({ className, onAppointmentSelect }: DailySched
                       )}
 
                       {/* Recurring indicator */}
-                      {appointment.series_id && (
-                        <Box sx={{ mt: 1 }}>
+                      <Box sx={{ mt: 1, display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
+                        {appointment.series_id && (
                           <Chip
                             label="Recurring"
                             size="small"
                             variant="outlined"
                             color="secondary"
                           />
-                        </Box>
-                      )}
+                        )}
+                        <Tooltip title="Therapy History">
+                          <IconButton
+                            size="small"
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            setTherapyHistoryStudent({
+                              id: appointment.student_id,
+                              name: appointment.student_name || `Student ${appointment.student_id}`
+                            });
+                          }}
+                          sx={{
+                            border: '1px solid',
+                            borderColor: 'divider',
+                            color: '#41AAB7',
+                            width: isMobile ? 28 : 32,
+                            height: isMobile ? 28 : 32,
+                            '&:hover': {
+                              borderColor: '#41AAB7',
+                              backgroundColor: 'rgba(65, 170, 183, 0.08)'
+                            }
+                          }}
+                        >
+                          <Timeline fontSize="small" />
+                        </IconButton>
+                        </Tooltip>
+                      </Box>
                     </Box>
                   </Box>
                 </Paper>
@@ -476,6 +515,15 @@ export function DailyScheduleView({ className, onAppointmentSelect }: DailySched
             </Stack>
           )}
       </Box>
+
+      {therapyHistoryStudent && (
+        <StudentTherapyHistoryDialog
+          open={Boolean(therapyHistoryStudent)}
+          onClose={() => setTherapyHistoryStudent(null)}
+          studentId={therapyHistoryStudent.id}
+          studentName={therapyHistoryStudent.name}
+        />
+      )}
     </Card>
   );
 }

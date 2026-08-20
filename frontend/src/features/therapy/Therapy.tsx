@@ -107,26 +107,27 @@ export default function Therapy() {
       }}>
         {/* Header */}
         <Box sx={{ 
-          bgcolor: 'white',
-          borderBottom: '1px solid #e8f4f5',
-          py: isMobile ? 2 : 3,
-          px: isMobile ? 2 : 3,
-          boxShadow: '0 2px 4px rgba(0,0,0,0.05)',
-          flexShrink: 0
+          bgcolor: 'background.default',
+          py: { xs: 1.5, sm: 2 },
+          px: { xs: 1.5, sm: 2 },
+          flexShrink: 0,
+          position: 'sticky',
+          top: 0,
+          zIndex: 2,
         }}>
-          <Typography 
-            variant={isMobile ? "h5" : "h4"} 
-            component="h1" 
-            sx={{ 
-              display: 'flex', 
+          <Typography
+            component="h1"
+            sx={{
+              display: 'flex',
               alignItems: 'center',
               color: '#41AAB7',
               fontWeight: 700,
-              fontSize: isMobile ? '1.5rem' : undefined,
-              gap: 2
+              gap: 1.25,
+              fontSize: { xs: '1.35rem', sm: '1.5rem' },
+              lineHeight: 1.2,
             }}
           >
-            <Stethoscope size={isMobile ? 24 : 32} />
+            <Stethoscope size={24} />
             Therapy
           </Typography>
         </Box>
@@ -135,8 +136,8 @@ export default function Therapy() {
         <Box sx={{ 
           flex: 1,
           overflow: 'auto',
-          px: isMobile ? 2 : 3,
-          py: isMobile ? 2 : 3
+          px: { xs: 1.5, sm: 2 },
+          py: { xs: 1.5, sm: 2 }
         }}>
 
         {/* Error Alert */}

@@ -4,11 +4,12 @@ from sqlalchemy.orm import Session
 from typing import Optional
 
 from app.db.database import get_db
+from app.dependencies.auth import get_auth_context
 from app.services.goals_import_service import GoalsImportService
 from app.schemas.goals_import import GoalsImportRequest, GoalsImportResult, generate_goals_csv_template
 
 
-router = APIRouter(prefix="/api/goals-csv", tags=["goals-csv-import"])
+router = APIRouter(prefix="/api/goals-csv", tags=["goals-csv-import"], dependencies=[Depends(get_auth_context)])
 
 
 @router.get("/template")

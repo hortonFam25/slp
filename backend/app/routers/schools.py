@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 from typing import List, Optional
 
 from app.db.database import get_db
+from app.dependencies.auth import get_auth_context
 from app.repositories.school_repository import SchoolRepository
 from app.schemas.school import (
     SchoolCreate,
@@ -15,7 +16,7 @@ from app.schemas.school import (
 )
 
 
-router = APIRouter(prefix="/api", tags=["schools"])
+router = APIRouter(prefix="/api", tags=["schools"], dependencies=[Depends(get_auth_context)])
 
 
 @router.get("/schools", response_model=List[SchoolRead])

@@ -22,5 +22,19 @@ from app.models.block_assignment import BlockAssignment  # noqa: F401
 from app.models.therapy_session import TherapySession  # noqa: F401
 from app.models.session_goal import SessionGoal  # noqa: F401
 from app.models.session_objective import SessionObjective  # noqa: F401
+from app.models.ai_chat_session import AIChatSession  # noqa: F401
+from app.models.ai_chat_message import AIChatMessage  # noqa: F401
+from app.models.ai_saved_progress_note import AISavedProgressNote  # noqa: F401
+from app.models.user import User  # noqa: F401
+from app.models.user_student_access import UserStudentAccess  # noqa: F401
+from app.models.role import Role  # noqa: F401
+from app.models.teacher_role import TeacherRole  # noqa: F401
 
 
+from app.models.api_token import ApiToken  # noqa: F401
+
+# The OAuth facade's own tables. Imported after ApiToken because api_tokens
+# carries the (later-added) FK columns that point back at these.
+from app.models.oauth_client import OAuthClient  # noqa: F401
+from app.models.oauth_code import OAuthCode  # noqa: F401
+from app.models.oauth_refresh_token import OAuthRefreshToken  # noqa: F401

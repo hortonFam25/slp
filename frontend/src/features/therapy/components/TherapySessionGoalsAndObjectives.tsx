@@ -54,6 +54,7 @@ import {
   ExpandLess,
   History,
   Close,
+  ChevronLeft,
   ChevronRight,
   Notes,
   TrendingUp,
@@ -62,7 +63,7 @@ import {
   GridView
 } from '@mui/icons-material';
 import { format } from 'date-fns';
-import type { TherapySession } from '../../../lib/api/therapySessions';
+import { therapySessionsApi, type TherapySession } from '../../../lib/api/therapySessions';
 import type { IEPGoal, GoalObjective } from '../../../lib/api/types/goals';
 
 interface TherapySessionGoalsAndObjectivesProps {
@@ -131,6 +132,7 @@ export interface GridProgressViewProps {
   session: TherapySession;
   disabled?: boolean;
   onUpdateObjectiveProgress?: (objectiveId: number, updates: any) => void;
+  showDateNavigator?: boolean;
 }
 
 export function GridProgressView({ 
@@ -138,7 +140,8 @@ export function GridProgressView({
   availableGoals, 
   session, 
   disabled, 
-  onUpdateObjectiveProgress 
+  onUpdateObjectiveProgress,
+  showDateNavigator = false
 }: GridProgressViewProps) {
   const theme = useTheme();
   const isMobile = useMediaQuery(theme.breakpoints.down('sm'));
@@ -147,7 +150,8 @@ export function GridProgressView({
   const GRID_INDEPENDENCE_LEVELS = ['independent', 'minimal_prompts', 'moderate_prompts', 'maximum_prompts', 'hand_over_hand'];
   const GRID_PROMPT_LEVELS = ['none', 'verbal', 'gestural', 'visual', 'physical', 'full_physical'];
   const GRID_STUDENT_RESPONSES = ['engaged', 'motivated', 'neutral', 'frustrated', 'resistant'];
-  const [sessions, setSessions] = useState<TherapySession[]>([]);
+  const [allSessions, setAllSessions] = useState<TherapySession[]>([]);
+  const [windowStartIndex, setWindowStartIndex] = useState(0);
   const [loading, setLoading] = useState(true);
   const [editingCell, setEditingCell] = useState<{objectiveId: number, sessionId: number, objectiveTitle: string, sessionDate: string, preSessionNotes?: string} | null>(null);
   const [editingNotes, setEditingNotes] = useState('');
@@ -159,6 +163,36 @@ export function GridProgressView({
     accuracy_percentage: undefined as number | undefined,
     independence_level: ''
   });
+  const SESSIONS_WINDOW_SIZE = 12;
+
+  const getDefaultWindowStart = (sortedSessions: TherapySession[]) => {
+    if (sortedSessions.length <= SESSIONS_WINDOW_SIZE) {
+      return 0;
+    }
+
+    const maxStart = Math.max(0, sortedSessions.length - SESSIONS_WINDOW_SIZE);
+    const sessionIndex = sortedSessions.findIndex((currentSession) => currentSession.id === session.id);
+
+    if (sessionIndex >= 0) {
+      return Math.min(maxStart, Math.max(0, sessionIndex - 7));
+    }
+
+    const todayStr = new Date().toISOString().split('T')[0];
+    const todayIndex = sortedSessions.findIndex(
+      (currentSession) => currentSession.session_date.split('T')[0] === todayStr
+    );
+
+    if (todayIndex >= 0) {
+      return Math.min(maxStart, Math.max(0, todayIndex - 7));
+    }
+
+    return maxStart;
+  };
+
+  const visibleSessions = allSessions.slice(windowStartIndex, windowStartIndex + SESSIONS_WINDOW_SIZE);
+  const maxWindowStart = Math.max(0, allSessions.length - SESSIONS_WINDOW_SIZE);
+  const canShowOlder = windowStartIndex > 0;
+  const canShowNewer = windowStartIndex < maxWindowStart;
 
   // Fetch school year sessions for this student
   useEffect(() => {
@@ -166,68 +200,35 @@ export function GridProgressView({
       try {
         setLoading(true);
         const { start, end } = getSchoolYearRange();
+        const anchorDate = session.session_date
+          ? new Date(session.session_date).toISOString().split('T')[0]
+          : new Date().toISOString().split('T')[0];
         
-        // Get ALL sessions for the school year (use max limit of 50)
-        const response = await fetch(
-          `${import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'}/api/therapy-sessions/student/${studentId}/school-year?start_date=${start.toISOString().split('T')[0]}&end_date=${end.toISOString().split('T')[0]}&limit=50`
+        // Get a school-year window centered around the current session date.
+        const fetchedSessions = await therapySessionsApi.getStudentSchoolYearSessions(
+          studentId,
+          start.toISOString().split('T')[0],
+          end.toISOString().split('T')[0],
+          75,
+          anchorDate
         );
-        const allSessions = await response.json();
         
+        // Always include the active session even when the historical fetch is capped.
+        const sessionsForGrid = Array.from(
+          new Map([...fetchedSessions, session].map((currentSession) => [currentSession.id, currentSession])).values()
+        );
+
         // Sort sessions by date (oldest to newest)
-        const sortedSessions = allSessions.sort((a: any, b: any) => 
+        const sortedSessions = sessionsForGrid.sort((a: any, b: any) => 
           new Date(a.session_date).getTime() - new Date(b.session_date).getTime()
         );
         
-        console.log('All sessions:', sortedSessions.map(s => ({ date: s.session_date, id: s.id })));
-        
-        // Smart grid logic: center around today's session
-        const today = new Date();
-        const todayStr = today.toISOString().split('T')[0];
-        
-        console.log('Looking for today:', todayStr);
-        
-        // Find today's session index (compare date part only, ignore time)
-        const todayIndex = sortedSessions.findIndex((session: any) => 
-          session.session_date.split('T')[0] === todayStr
-        );
-        
-        console.log('Today index:', todayIndex);
-        
-        let displaySessions;
-        
-        if (todayIndex === -1) {
-          // No session today, show the 12 most recent sessions
-          displaySessions = sortedSessions.slice(-12);
-        } else {
-          // Center around today's session (position 8 out of 12)
-          // We want: 7 sessions before today + today + 4 sessions after today
-          const sessionsBefore = 7;
-          const sessionsAfter = 4;
-          
-          const startIndex = Math.max(0, todayIndex - sessionsBefore);
-          const endIndex = Math.min(sortedSessions.length, startIndex + 12); // Always try to get 12 sessions
-          
-          // If we can't get 12 sessions from the calculated start, adjust
-          if (endIndex - startIndex < 12) {
-            if (startIndex === 0) {
-              // Near beginning, take first 12
-              displaySessions = sortedSessions.slice(0, Math.min(12, sortedSessions.length));
-            } else {
-              // Near end, take last 12
-              displaySessions = sortedSessions.slice(-12);
-            }
-          } else {
-            displaySessions = sortedSessions.slice(startIndex, endIndex);
-          }
-        }
-        
-        console.log('Display sessions:', displaySessions.map(s => ({ date: s.session_date, id: s.id })));
-        console.log('Today position in display:', displaySessions.findIndex(s => s.session_date === todayStr));
-        
-        setSessions(displaySessions);
+        setAllSessions(sortedSessions);
+        setWindowStartIndex(getDefaultWindowStart(sortedSessions));
       } catch (error) {
         console.error('Failed to fetch school year sessions:', error);
-        setSessions([]);
+        setAllSessions([]);
+        setWindowStartIndex(0);
       } finally {
         setLoading(false);
       }
@@ -236,13 +237,13 @@ export function GridProgressView({
     if (studentId) {
       fetchSchoolYearSessions();
     }
-  }, [studentId]);
+  }, [studentId, session.id, session.session_date]);
 
   const handleCellClick = (objectiveId: number, sessionId: number, currentNotes: string, objectiveTitle: string, sessionDate: string, preSessionNotes?: string) => {
     if (disabled) return;
     
     // Find the session objective data to populate tracking fields
-    const sessionData = sessions.find(s => s.id === sessionId);
+    const sessionData = allSessions.find(s => s.id === sessionId);
     const sessionObjective = sessionData?.session_objectives?.find(so => so.objective_id === objectiveId);
     
     setEditingCell({ objectiveId, sessionId, objectiveTitle, sessionDate, preSessionNotes });
@@ -277,24 +278,14 @@ export function GridProgressView({
         independence_level: trackingData.independence_level || undefined
       };
 
-      // Make direct API call to update the specific session objective
-      const response = await fetch(
-        `${import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'}/api/therapy-sessions/${editingCell.sessionId}/objectives/${editingCell.objectiveId}`,
-        {
-          method: 'PUT',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify(updateData)
-        }
+      await therapySessionsApi.updateSessionObjective(
+        editingCell.sessionId,
+        editingCell.objectiveId,
+        updateData
       );
-
-      if (!response.ok) {
-        throw new Error(`Failed to save notes: ${response.statusText}`);
-      }
       
       // Update the local sessions state to reflect the new notes immediately
-      setSessions(prevSessions => 
+      setAllSessions(prevSessions => 
         prevSessions.map(sess => {
           if (sess.id !== editingCell.sessionId) return sess;
           
@@ -374,18 +365,72 @@ export function GridProgressView({
   }
 
   return (
-    <TableContainer 
-      component={Paper} 
-      sx={{ 
-        overflow: 'auto',
-        border: 1,
-        borderColor: 'grey.300',
-        borderRadius: 2,
-        maxWidth: '100vw',
-        height: isMobile ? 'calc(100vh - 200px)' : 'calc(100vh - 250px)',
-        mb: 2
-      }}
-    >
+    <Box sx={{ display: 'flex', flexDirection: 'column', minHeight: 0, height: '100%', overflow: 'hidden' }}>
+      {showDateNavigator && (
+        <Box
+          sx={{
+            px: 1.5,
+            py: 1,
+            mb: 1,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            border: 1,
+            borderColor: 'grey.300',
+            borderRadius: 2,
+            backgroundColor: '#f8fffe'
+          }}
+        >
+          <Button
+            size="small"
+            startIcon={<ChevronLeft />}
+            onClick={() => setWindowStartIndex(prev => Math.max(0, prev - SESSIONS_WINDOW_SIZE))}
+            disabled={!canShowOlder}
+            sx={{ textTransform: 'none' }}
+          >
+            Previous 12
+          </Button>
+          <Typography variant="body2" color="text.secondary" sx={{ fontWeight: 600 }}>
+            {visibleSessions.length > 0
+              ? `${format(new Date(visibleSessions[0].session_date), 'MMM d, yyyy')} - ${format(
+                  new Date(visibleSessions[visibleSessions.length - 1].session_date),
+                  'MMM d, yyyy'
+                )}`
+              : 'No sessions in this range'}
+          </Typography>
+          <Button
+            size="small"
+            endIcon={<ChevronRight />}
+            onClick={() => setWindowStartIndex(prev => Math.min(maxWindowStart, prev + SESSIONS_WINDOW_SIZE))}
+            disabled={!canShowNewer}
+            sx={{ textTransform: 'none' }}
+          >
+            Next 12
+          </Button>
+        </Box>
+      )}
+      <TableContainer 
+        component={Paper} 
+        sx={{ 
+          overflowX: 'auto',
+          overflowY: 'auto',
+          border: 1,
+          borderColor: 'grey.300',
+          borderRadius: 2,
+          width: '100%',
+          maxWidth: '100%',
+          ...(showDateNavigator
+            ? {
+                flex: 1,
+                minHeight: 0
+              }
+            : {
+                height: isMobile ? 'calc(100vh - 200px)' : 'calc(100vh - 250px)'
+              }),
+          mb: 2,
+          WebkitOverflowScrolling: 'touch'
+        }}
+      >
       <Table stickyHeader size="small">
         {/* Table Header */}
         <TableHead>
@@ -397,15 +442,16 @@ export function GridProgressView({
                 fontWeight: 600,
                 minWidth: isMobile ? 200 : 300,
                 position: 'sticky',
+                top: 0,
                 left: 0,
-                zIndex: 10,
+                zIndex: 11,
                 boxShadow: '2px 0 4px rgba(0,0,0,0.1)',
                 fontSize: isMobile ? '0.875rem' : '1rem'
               }}
             >
               {isMobile ? 'Goals & Obj.' : 'Goals & Objectives'}
             </TableCell>
-            {sessions.map((sess) => {
+            {visibleSessions.map((sess) => {
               const isCurrentSession = sess.id === session.id;
               return (
                 <TableCell
@@ -415,6 +461,9 @@ export function GridProgressView({
                     backgroundColor: isCurrentSession ? '#2D7A85' : '#41AAB7',
                     color: 'white',
                     fontWeight: 600,
+                    position: 'sticky',
+                    top: 0,
+                    zIndex: 10,
                     minWidth: isMobile ? 90 : 120,
                     maxWidth: isMobile ? 100 : 120,
                     fontSize: isMobile ? '0.75rem' : '0.9rem',
@@ -437,7 +486,7 @@ export function GridProgressView({
               {/* Goal Header Row */}
               <TableRow>
                 <TableCell
-                  colSpan={sessions.length + 1}
+                  colSpan={visibleSessions.length + 1}
                   sx={{
                     backgroundColor: '#E8F6F8', // Light teal background for goals
                     fontWeight: 600,
@@ -543,7 +592,7 @@ export function GridProgressView({
                     </Box>
                   </TableCell>
 
-                  {sessions.map((sess) => {
+                  {visibleSessions.map((sess) => {
                     const sessionObjective = sess.session_objectives?.find(
                       so => so.objective_id === objective.id
                     );
@@ -665,6 +714,7 @@ export function GridProgressView({
           ))}
         </TableBody>
       </Table>
+      </TableContainer>
 
       {/* Notes Editing Modal */}
       <Dialog 
@@ -866,7 +916,7 @@ export function GridProgressView({
           </Button>
         </DialogActions>
       </Dialog>
-    </TableContainer>
+    </Box>
   );
 }
 
@@ -1005,8 +1055,7 @@ export function TherapySessionGoalsAndObjectives({
     setHistoricalSidebarOpen(true);
     
     try {
-      const response = await fetch(`${import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'}/api/therapy-sessions/goals/${goal.id}/history`);
-      const data = await response.json();
+      const data = await therapySessionsApi.getGoalHistory(goal.id);
       
       const sessionData = data.sessions.map((sessionObj: any) => ({
         session_date: sessionObj.therapy_session?.session_date || sessionObj.created_date,
@@ -1047,8 +1096,7 @@ export function TherapySessionGoalsAndObjectives({
     setHistoricalSidebarOpen(true);
     
     try {
-      const response = await fetch(`${import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'}/api/therapy-sessions/objectives/${objective.id}/history`);
-      const data = await response.json();
+      const data = await therapySessionsApi.getObjectiveHistory(objective.id);
       
       const sessionData = data.map((sessionObj: any) => ({
         session_date: sessionObj.therapy_session?.session_date || sessionObj.created_date,
@@ -1114,9 +1162,13 @@ export function TherapySessionGoalsAndObjectives({
   };
 
   return (
-    <Box sx={{ position: 'relative' }}>
+    <Box sx={{ position: 'relative', display: 'flex', flexDirection: 'column', minHeight: 0, height: '100%', overflow: 'hidden' }}>
       {/* Main Content */}
       <Box sx={{ 
+        display: 'flex',
+        flexDirection: 'column',
+        flex: 1,
+        minHeight: 0,
         transition: 'margin-right 0.3s ease',
         marginRight: (historicalSidebarOpen && !isMobile) ? '400px' : 0 
       }}>
@@ -1719,13 +1771,16 @@ export function TherapySessionGoalsAndObjectives({
           })}
         </Grid>
       ) : (
-        <GridProgressView 
-          studentId={session.student_id}
-          availableGoals={availableGoals}
-          session={session}
-          disabled={disabled}
-          onUpdateObjectiveProgress={onUpdateObjectiveProgress}
-        />
+        <Box sx={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
+          <GridProgressView 
+            studentId={session.student_id}
+            availableGoals={availableGoals}
+            session={session}
+            disabled={disabled}
+            showDateNavigator
+            onUpdateObjectiveProgress={onUpdateObjectiveProgress}
+          />
+        </Box>
       )}
       </Box>
       

@@ -164,6 +164,59 @@ class TherapySessionRepository:
         
         return query.offset(skip).limit(limit).all()
 
+    def get_school_year_sessions_relative(
+        self,
+        student_id: int,
+        start_date: date,
+        end_date: date,
+        anchor_date: date,
+        limit: int = 75,
+        include_goals: bool = False,
+        include_objectives: bool = False,
+    ) -> List[TherapySession]:
+        """Get a window of school-year sessions centered around an anchor date."""
+        query = self.db.query(TherapySession).join(Student).filter(
+            TherapySession.student_id == student_id
+        )
+
+        start_datetime = datetime.combine(start_date, datetime.min.time())
+        end_datetime = datetime.combine(end_date, datetime.max.time())
+        query = query.filter(
+            TherapySession.session_date >= start_datetime,
+            TherapySession.session_date <= end_datetime,
+        )
+
+        if include_goals:
+            query = query.options(selectinload(TherapySession.session_goals))
+
+        if include_objectives:
+            query = query.options(selectinload(TherapySession.session_objectives))
+
+        query = query.options(joinedload(TherapySession.student))
+
+        sessions = query.order_by(TherapySession.session_date.asc()).all()
+        if len(sessions) <= limit:
+            return sessions
+
+        anchor_index = next(
+            (index for index, session in enumerate(sessions) if session.session_date.date() == anchor_date),
+            None,
+        )
+
+        if anchor_index is None:
+            anchor_end = datetime.combine(anchor_date, datetime.max.time())
+            anchor_index = max(
+                0,
+                sum(1 for session in sessions if session.session_date <= anchor_end) - 1,
+            )
+
+        half_window = limit // 2
+        window_start = max(0, anchor_index - half_window)
+        max_window_start = max(0, len(sessions) - limit)
+        window_start = min(window_start, max_window_start)
+
+        return sessions[window_start:window_start + limit]
+
     def update_session(self, session_id: int, session_data: TherapySessionUpdate) -> Optional[TherapySession]:
         """Update an existing therapy session"""
         session = self.get_session_by_id(session_id)

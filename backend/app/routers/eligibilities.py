@@ -3,6 +3,8 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.db.database import get_db
+from app.dependencies.access_control import ensure_eligibility_access
+from app.dependencies.auth import AuthContext, ensure_student_access, get_auth_context
 from app.repositories.eligibility_repository import EligibilityRepository
 from app.schemas.eligibility import (
     EligibilityCategoryRead,
@@ -11,7 +13,7 @@ from app.schemas.eligibility import (
     StudentEligibilityUpdate
 )
 
-router = APIRouter(prefix="/api", tags=["eligibilities"])
+router = APIRouter(prefix="/api", tags=["eligibilities"], dependencies=[Depends(get_auth_context)])
 
 
 @router.get("/eligibilities/categories", response_model=List[EligibilityCategoryRead])
@@ -27,9 +29,11 @@ def get_eligibility_categories(
 @router.get("/eligibilities/students/{student_id}", response_model=List[StudentEligibilityRead])
 def get_student_eligibilities(
     student_id: int,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """Get all eligibilities for a specific student"""
+    ensure_student_access(auth, student_id, action="get student eligibilities")
     repo = EligibilityRepository(db)
     return repo.get_student_eligibilities(student_id)
 
@@ -37,9 +41,11 @@ def get_student_eligibilities(
 @router.post("/eligibilities/students", response_model=StudentEligibilityRead)
 def create_student_eligibility(
     payload: StudentEligibilityCreate,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """Create a new student eligibility"""
+    ensure_student_access(auth, payload.student_id, action="create student eligibility")
     repo = EligibilityRepository(db)
     
     # Verify the eligibility category exists
@@ -63,9 +69,11 @@ def create_student_eligibility(
 def update_student_eligibility(
     eligibility_id: int,
     payload: StudentEligibilityUpdate,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """Update an existing student eligibility"""
+    ensure_eligibility_access(db, auth, eligibility_id)
     repo = EligibilityRepository(db)
     
     eligibility = repo.update_student_eligibility(eligibility_id, payload)
@@ -81,9 +89,11 @@ def update_student_eligibility(
 @router.delete("/eligibilities/students/{eligibility_id}")
 def delete_student_eligibility(
     eligibility_id: int,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """Delete a student eligibility"""
+    ensure_eligibility_access(db, auth, eligibility_id)
     repo = EligibilityRepository(db)
     
     if not repo.delete_student_eligibility(eligibility_id):

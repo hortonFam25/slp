@@ -171,7 +171,7 @@ export function SchoolCard({ school, onEdit, onDelete }: SchoolCardProps) {
                       {school.active_teachers_count}
                     </Typography>
                     <Typography variant="caption" color="text.secondary">
-                      Teachers
+                      Support Staff
                     </Typography>
                   </Box>
                 </Grid>

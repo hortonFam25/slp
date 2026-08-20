@@ -128,72 +128,90 @@ export default function Analytics() {
 
   return (
     <Box sx={{ 
-      flex: 1, 
-      p: 3,
+      flex: 1,
+      height: '100%',
+      display: 'flex',
+      flexDirection: 'column',
+      overflow: 'hidden',
+      p: { xs: 1.5, sm: 2 },
       bgcolor: '#fafafa',
-      minHeight: '100vh'
+      minHeight: 0,
     }}>
       {/* Page Header */}
-      <Box sx={{ mb: 4 }}>
-        <Typography variant="h4" sx={{ 
+      <Box
+        sx={{
+          mb: 1.5,
+          position: 'sticky',
+          top: 0,
+          zIndex: 2,
+          bgcolor: '#fafafa',
+          flexShrink: 0,
+          pt: 0.25,
+        }}
+      >
+        <Typography sx={{ 
           fontWeight: 700, 
           color: '#41AAB7',
           display: 'flex',
           alignItems: 'center',
-          gap: 2
+          gap: 1.25,
+          fontSize: { xs: '1.35rem', sm: '1.5rem' },
+          lineHeight: 1.2
         }}>
-          <BarChart3 size={32} />
+          <BarChart3 size={24} />
           Analytics
         </Typography>
       </Box>
 
-      {/* KPI Cards */}
-      <Grid container spacing={3} sx={{ mb: 4 }}>
-        <Grid item xs={12} sm={6} md={4}>
-          <KPICard
-            title="Active Students"
-            value={activeStudents.length}
-            icon={<UsersRound />}
-            loading={studentsLoading}
-            subtitle={`${students.length} total students`}
-            color="#40A8B6"
-          />
+      <Box sx={{ flex: 1, overflow: 'auto', minHeight: 0 }}>
+        {/* KPI Cards */}
+        <Grid container spacing={2} sx={{ mb: 2 }}>
+          <Grid item xs={12} sm={6} md={4}>
+            <KPICard
+              title="Active Students"
+              value={activeStudents.length}
+              icon={<UsersRound />}
+              loading={studentsLoading}
+              subtitle={`${students.length} total students`}
+              color="#40A8B6"
+            />
+          </Grid>
+          
+          <Grid item xs={12} sm={6} md={4}>
+            <KPICard
+              title="Today's Sessions"
+              value={todayAppointments.length}
+              icon={<Calendar />}
+              loading={appointmentsLoading}
+              subtitle="Scheduled appointments"
+              color="#66BB6A"
+            />
+          </Grid>
+          
+          <Grid item xs={12} sm={6} md={4}>
+            <KPICard
+              title="Completed Today"
+              value={completedSessionsToday.length}
+              icon={<CheckCircle />}
+              loading={sessionsLoading}
+              subtitle="Therapy sessions"
+              color="#42A5F5"
+            />
+          </Grid>
         </Grid>
-        
-        <Grid item xs={12} sm={6} md={4}>
-          <KPICard
-            title="Today's Sessions"
-            value={todayAppointments.length}
-            icon={<Calendar />}
-            loading={appointmentsLoading}
-            subtitle="Scheduled appointments"
-            color="#66BB6A"
-          />
-        </Grid>
-        
-        <Grid item xs={12} sm={6} md={4}>
-          <KPICard
-            title="Completed Today"
-            value={completedSessionsToday.length}
-            icon={<CheckCircle />}
-            loading={sessionsLoading}
-            subtitle="Therapy sessions"
-            color="#42A5F5"
-          />
-        </Grid>
-      </Grid>
 
-      {/* Placeholder for future analytics */}
-      <Card sx={{ mt: 3 }}>
-        <CardContent sx={{ p: 4, textAlign: 'center' }}>
-          <Typography variant="h6" color="text.secondary" sx={{ mb: 2 }}>
-            More Analytics Coming Soon
-          </Typography>
-          <Typography variant="body2" color="text.secondary">
-            This page will be expanded with charts, reports, and detailed analytics.
-          </Typography>
-        </CardContent>
-      </Card>
+        {/* Placeholder for future analytics */}
+        <Card sx={{ mt: 2 }}>
+          <CardContent sx={{ p: 4, textAlign: 'center' }}>
+            <Typography variant="h6" color="text.secondary" sx={{ mb: 2 }}>
+              More Analytics Coming Soon
+            </Typography>
+            <Typography variant="body2" color="text.secondary">
+              This page will be expanded with charts, reports, and detailed analytics.
+            </Typography>
+          </CardContent>
+        </Card>
+      </Box>
     </Box>
   );
 }

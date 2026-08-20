@@ -41,10 +41,16 @@ function TabPanel(props: TabPanelProps) {
       hidden={value !== index}
       id={`goals-tabpanel-${index}`}
       aria-labelledby={`goals-tab-${index}`}
+      style={{
+        height: '100%',
+        display: value === index ? 'flex' : 'none',
+        flexDirection: 'column',
+        minHeight: 0
+      }}
       {...other}
     >
       {value === index && (
-        <Box sx={{ pt: 3 }}>
+        <Box sx={{ pt: 1.5, height: '100%', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
           {children}
         </Box>
       )}
@@ -80,14 +86,24 @@ export default function Goals() {
 
   return (
     <Box sx={{ 
-      p: isMobile ? 2 : 3,
+      p: { xs: 1.5, sm: 2 },
       height: '100%',
       display: 'flex',
       flexDirection: 'column',
       overflow: 'hidden'
     }}>
       {/* Header */}
-      <Box sx={{ flexShrink: 0, mb: 2 }}>
+      <Box
+        sx={{
+          flexShrink: 0,
+          mb: 1.5,
+          position: 'sticky',
+          top: 0,
+          zIndex: 2,
+          bgcolor: 'background.default',
+          pt: 0.25,
+        }}
+      >
         <Box sx={{
           display: 'flex',
           justifyContent: 'space-between',
@@ -96,19 +112,19 @@ export default function Goals() {
           gap: isMobile ? 2 : 0,
           mb: 2
         }}>
-          <Typography 
-            variant={isMobile ? "h5" : "h4"} 
-            component="h1" 
-            sx={{ 
-              display: 'flex', 
+          <Typography
+            component="h1"
+            sx={{
+              display: 'flex',
               alignItems: 'center',
-              fontSize: isMobile ? '1.5rem' : undefined,
               color: '#41AAB7',
               fontWeight: 700,
-              gap: 2
+              gap: 1.25,
+              fontSize: { xs: '1.35rem', sm: '1.5rem' },
+              lineHeight: 1.2,
             }}
           >
-            <Target size={isMobile ? 24 : 32} />
+            <Target size={24} />
             Goals
           </Typography>
           
@@ -172,19 +188,13 @@ export default function Goals() {
         {/* Tab Panel 0: Student Goal Management */}
         <TabPanel value={tabValue} index={0}>
           <Box sx={{ 
-            height: '70vh',
+            height: '100%',
             display: 'flex',
-            flexDirection: 'column'
+            flexDirection: 'column',
+            minHeight: 0
           }}>
-            {/* Sticky Header Section */}
+            {/* Filter Header */}
             <Box sx={{ 
-              position: 'sticky',
-              top: 0,
-              zIndex: 10,
-              backgroundColor: 'background.default',
-              borderBottom: 1,
-              borderColor: 'divider',
-              pb: 1,
               mb: 2,
               flexShrink: 0
             }}>
@@ -294,6 +304,7 @@ export default function Goals() {
         <TabPanel value={tabValue} index={1}>
           <Box sx={{ 
             height: '100%',
+            minHeight: 0,
             overflow: 'auto'
           }}>
             <GoalCategoriesManagement />

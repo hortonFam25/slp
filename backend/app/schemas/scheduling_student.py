@@ -42,6 +42,7 @@ class StudentScheduleView(BaseModel):
     """Comprehensive student data for scheduling functionality"""
     # Basic student info
     id: int
+    student_alias: str
     first: str
     last: str
     uic: Optional[str] = None

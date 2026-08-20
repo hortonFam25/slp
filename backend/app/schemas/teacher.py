@@ -1,6 +1,7 @@
 from pydantic import BaseModel, Field
 from typing import Optional, List
 from datetime import date, datetime
+from app.schemas.role import RoleRead
 
 
 class TeacherBase(BaseModel):
@@ -17,7 +18,7 @@ class TeacherBase(BaseModel):
 
 
 class TeacherCreate(TeacherBase):
-    pass
+    role_ids: List[int] = Field(default_factory=list, description="Role IDs assigned to this teacher")
 
 
 class TeacherUpdate(BaseModel):
@@ -31,6 +32,7 @@ class TeacherUpdate(BaseModel):
     preferred_contact_method: Optional[str] = Field(None, max_length=20)
     notes: Optional[str] = None
     is_active: Optional[bool] = None
+    role_ids: Optional[List[int]] = None
 
 
 class TeacherRead(TeacherBase):
@@ -43,6 +45,7 @@ class TeacherRead(TeacherBase):
     primary_school_name: Optional[str] = Field(None, description="Primary school name")
     current_schools_names: Optional[List[str]] = Field(None, description="List of current school names")
     active_schools_count: Optional[int] = Field(None, description="Number of active school assignments")
+    roles: List[RoleRead] = Field(default_factory=list, description="Assigned support staff roles")
 
     class Config:
         from_attributes = True

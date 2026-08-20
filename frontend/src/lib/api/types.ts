@@ -45,4 +45,5 @@ export const API_ENDPOINTS = {
   PROGRESS: '/api/progress',
   SERVICES: '/api/services',
   ELIGIBILITIES: '/api/eligibilities',
+  AI_CHAT: '/api/ai-chat',
 } as const;

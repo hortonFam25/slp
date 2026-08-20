@@ -7,6 +7,7 @@ class Student(Base):
     __tablename__ = "students"
 
     id = Column(Integer, primary_key=True, index=True)
+    student_alias = Column(String(64), unique=True, nullable=False, index=True)
     first = Column(String(100), nullable=False)
     last = Column(String(100), nullable=False)
     uic = Column(String(50), unique=True, nullable=True, index=True)
@@ -53,6 +54,10 @@ class Student(Base):
     @property
     def full_name(self) -> str:
         return f"{self.first} {self.last}"
+
+    @property
+    def alias(self) -> str:
+        return self.student_alias or f"student_{self.id}"
     
     @property
     def is_active(self) -> bool:

@@ -1,0 +1,349 @@
+name: deploy
+
+# main -> Azure App Service. Also runnable by hand, which is what automerge.yml
+# uses: a squash merge made with GITHUB_TOKEN does not fire `on: push`.
+#
+# SLP Pro is TWO app services in the `hortonfam` resource group, deployed
+# independently and in parallel:
+#
+#   slppro-api  PYTHON|3.11  FastAPI under gunicorn + uvicorn workers
+#   slppro      NODE|20-lts  the built SPA, served by `pm2 serve ... --spa`
+#
+# Neither job depends on the other. A frontend-only change still redeploys the
+# backend (and vice versa) — that is deliberate: shipping main means shipping
+# all of main, and a zip deploy of an unchanged tree is a no-op that takes a
+# minute.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  # OIDC: azure/login exchanges this short-lived token for an Azure one. There
+  # is NO client secret anywhere in this repo — the three ids below are repo
+  # VARIABLES, not secrets, because none of them is one.
+  id-token: write
+  contents: read
+
+concurrency:
+  group: deploy-slppro
+  cancel-in-progress: false
+
+env:
+  AZ_RESOURCE_GROUP: hortonfam
+  AZ_BACKEND_APP: slppro-api
+  AZ_FRONTEND_APP: slppro
+  BACKEND_URL: https://slppro-api-a7caazgxa2gcaaaz.eastus2-01.azurewebsites.net
+  FRONTEND_URL: https://slppro-dbgmguexhmd5h3fh.eastus2-01.azurewebsites.net
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # backend  ->  slppro-api
+  # ---------------------------------------------------------------------------
+  backend-deploy:
+    name: backend-deploy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The startup command is `gunicorn main:app -w 4 -k
+      # uvicorn.workers.UvicornWorker`, run from /home/site/wwwroot. So main.py
+      # has to sit at the ZIP ROOT — the contents of backend/, not the backend/
+      # directory itself. Oryx then finds requirements.txt beside it and builds
+      # the virtualenv on the server.
+      #
+      # `zip` on ubuntu writes forward-slash entries natively, which is the
+      # whole reason the packaging moved off the local PowerShell script.
+      - name: Zip the backend
+        run: |
+          cd backend
+          zip -r -q "$GITHUB_WORKSPACE/backend_deploy.zip" . \
+            -x 'venv/*' '*/venv/*' \
+               '.venv/*' '*/.venv/*' \
+               '__pycache__/*' '*/__pycache__/*' \
+               '*.pyc' \
+               '*.db' \
+               '.env' '.env.*' \
+               '.gitignore' \
+               'tests/*' \
+               '.pytest_cache/*'
+
+      # A zip that `az` accepts is not the same as a zip that boots. Everything
+      # that has actually broken a deploy here is checked before upload rather
+      # than diagnosed afterwards from a 502.
+      - name: Gate — the zip is laid out the way gunicorn expects
+        run: |
+          python3 - <<'PY'
+          import os, zipfile
+
+          names = zipfile.ZipFile("backend_deploy.zip").namelist()
+
+          # Windows-style separators produce literal `app\routers\health.py`
+          # filenames on a Linux App Service — imports then fail in ways that
+          # look nothing like a packaging problem.
+          bad = [n for n in names if "\\" in n]
+          assert not bad, f"backslash entries in the zip: {bad[:5]}"
+
+          for required in ("main.py", "requirements.txt"):
+              assert required in names, f"{required} is not at the zip root"
+
+          assert any(n.startswith("app/") for n in names), "no app/ package in the zip"
+          assert "app/__init__.py" in names, "app/ is not an importable package"
+
+          # Nothing that should have been excluded slipped through.
+          for pattern in ("venv/", "__pycache__/"):
+              leaked = [n for n in names if pattern in n]
+              assert not leaked, f"{pattern} leaked into the zip: {leaked[:3]}"
+          leaked_db = [n for n in names if n.endswith(".db")]
+          assert not leaked_db, f"a database file leaked into the zip: {leaked_db}"
+
+          print(f"zip OK: {len(names)} entries, "
+                f"{os.path.getsize('backend_deploy.zip') // 1024} KB")
+          PY
+
+      - name: Azure login (OIDC — no secrets)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy the zip to slppro-api
+        run: |
+          az webapp deployment source config-zip \
+            -g "$AZ_RESOURCE_GROUP" -n "$AZ_BACKEND_APP" \
+            --src "$GITHUB_WORKSPACE/backend_deploy.zip"
+
+      # A green `az` call only means the zip was accepted. Oryx still has to
+      # install requirements and gunicorn still has to import main:app. THIS is
+      # what "deployed" means.
+      #
+      # /api/health/live is the liveness probe — it returns {"live": true}
+      # without touching the database, so a paused Azure SQL serverless tier
+      # cannot fail the deploy. Readiness is reported below but not gated on,
+      # for exactly that reason.
+      - name: Verify /api/health/live
+        run: |
+          for attempt in $(seq 1 30); do
+            code=$(curl -sS -o /tmp/live.json -w '%{http_code}' \
+                   --max-time 30 "$BACKEND_URL/api/health/live" || echo 000)
+            body=$(cat /tmp/live.json 2>/dev/null || true)
+            echo "attempt $attempt: HTTP $code $body"
+            if [ "$code" = "200" ] && echo "$body" | grep -q '"live"[[:space:]]*:[[:space:]]*true'; then
+              echo "liveness OK after $attempt attempt(s)"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo 'FAIL: /api/health/live never answered 200 {"live":true}'
+          exit 1
+
+      - name: Verify the API root
+        run: |
+          code=$(curl -sS -o /tmp/root.json -w '%{http_code}' \
+                 --max-time 30 "$BACKEND_URL/" || echo 000)
+          body=$(cat /tmp/root.json 2>/dev/null || true)
+          echo "GET / -> HTTP $code $body"
+          if [ "$code" != "200" ] || ! echo "$body" | grep -q '"status"[[:space:]]*:[[:space:]]*"ok"'; then
+            echo 'FAIL: the API root is not serving {"status":"ok"}'
+            exit 1
+          fi
+
+      # Reported, never gated. Azure SQL serverless pauses when idle and takes
+      # up to a minute to resume; a cold database is not a bad deploy.
+      - name: Report /api/health/ready (informational)
+        continue-on-error: true
+        run: |
+          curl -sS --max-time 60 "$BACKEND_URL/api/health/ready" || true
+          echo
+
+  # ---------------------------------------------------------------------------
+  # frontend  ->  slppro
+  # ---------------------------------------------------------------------------
+  frontend-deploy:
+    name: frontend-deploy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # Always a FRESH build. frontend/dist is gitignored precisely so a stale
+      # local copy can never be what ships.
+      - name: Build the SPA
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+      # The gate added after the 2026-08-14 white-screen incident in the sibling
+      # repo: a 55-byte test stub once shipped as index.html and the app came up
+      # blank. Nothing gets zipped unless this is a real Vite build pointing at
+      # a real bundle.
+      - name: Gate — dist/ is a real build, not a stub
+        working-directory: frontend
+        run: |
+          python3 - <<'PY'
+          import os, re, sys
+
+          root = "dist"
+          idx_path = os.path.join(root, "index.html")
+          if not os.path.exists(idx_path):
+              sys.exit(f"FAIL: {idx_path} missing — the SPA was not built.")
+          idx = open(idx_path, encoding="utf-8").read()
+          m = re.search(r"assets/(index-[\w-]+\.js)", idx)
+          if not m or len(idx) <= 500:
+              sys.exit(f"FAIL: {idx_path} looks like a stub "
+                       f"(len={len(idx)}, bundle_ref={bool(m)}).")
+          bundle = os.path.join(root, "assets", m.group(1))
+          if not os.path.exists(bundle):
+              sys.exit(f"FAIL: index.html references {m.group(1)}, which is not there.")
+          size = os.path.getsize(bundle)
+          if size <= 100_000:
+              sys.exit(f"FAIL: {m.group(1)} is {size} bytes — that is not a real bundle.")
+          print(f"OK: index.html is {len(idx)} bytes and points at "
+                f"{m.group(1)} ({size // 1024} KB).")
+          PY
+
+      # The startup command is `pm2 serve /home/site/wwwroot --spa --no-daemon
+      # --port 8080`, so wwwroot IS the document root: index.html and assets/
+      # go at the zip ROOT, flat. A nested dist/ directory produces a 404 on
+      # every route.
+      - name: Zip the SPA
+        run: |
+          cd frontend/dist
+          zip -r -q "$GITHUB_WORKSPACE/frontend_deploy.zip" .
+
+      - name: Gate — the zip is laid out the way pm2 serve expects
+        run: |
+          python3 - <<'PY'
+          import os, zipfile
+
+          names = zipfile.ZipFile("frontend_deploy.zip").namelist()
+
+          bad = [n for n in names if "\\" in n]
+          assert not bad, f"backslash entries in the zip: {bad[:5]}"
+
+          assert "index.html" in names, (
+              "index.html is not at the zip root — pm2 serves wwwroot directly, "
+              f"so a nested layout 404s. Top entries: {names[:5]}")
+          assert any(n.startswith("assets/") for n in names), "no assets/ in the zip"
+          assert not any(n.startswith("dist/") for n in names), (
+              "the zip contains a nested dist/ — zip the CONTENTS of dist, not "
+              "the directory")
+
+          print(f"zip OK: {len(names)} entries, "
+                f"{os.path.getsize('frontend_deploy.zip') // 1024} KB")
+          PY
+
+      - name: Azure login (OIDC — no secrets)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy the zip to slppro
+        run: |
+          az webapp deployment source config-zip \
+            -g "$AZ_RESOURCE_GROUP" -n "$AZ_FRONTEND_APP" \
+            --src "$GITHUB_WORKSPACE/frontend_deploy.zip"
+
+      # This app service sits behind App Service Authentication ("Easy Auth"),
+      # configured to require an Azure AD sign-in and to answer anonymous
+      # requests with a bare `401 Unauthorized`, zero bytes, and a
+      # WWW-Authenticate header. So the check the backend job gets to make — GET
+      # the public URL and look at the HTML — is simply not available here: an
+      # unauthenticated runner can never see the shell, and a check that only
+      # accepted 200 would fail every single deploy.
+      #
+      # The content gate therefore reads what was actually written to
+      # /home/site/wwwroot, through Kudu's VFS API. Kudu accepts the same AAD
+      # token azure/login already obtained (ARM audience), so this needs no
+      # publishing profile, no SCM basic auth, and no extra secret.
+      #
+      # The SCM hostname is NOT `<app>.scm.azurewebsites.net` on a regional
+      # app service plan — it is the app's own generated host with `.scm.`
+      # spliced in. It gets asked for rather than assumed.
+      - name: Verify wwwroot holds a real build (Kudu VFS)
+        run: |
+          SCM=$(az webapp show -g "$AZ_RESOURCE_GROUP" -n "$AZ_FRONTEND_APP" \
+                --query "enabledHostNames[?contains(@, '.scm.')] | [0]" -o tsv)
+          echo "scm host: $SCM"
+          TOKEN=$(az account get-access-token \
+                  --resource https://management.azure.com \
+                  --query accessToken -o tsv)
+
+          code=000
+          for attempt in $(seq 1 30); do
+            code=$(curl -sS -o /tmp/wwwroot-index.html -w '%{http_code}' --max-time 30 \
+                   -H "Authorization: Bearer $TOKEN" \
+                   "https://$SCM/api/vfs/site/wwwroot/index.html" || echo 000)
+            echo "attempt $attempt: HTTP $code"
+            [ "$code" = "200" ] && break
+            sleep 10
+          done
+          if [ "$code" != "200" ]; then
+            echo "FAIL: could not read /home/site/wwwroot/index.html (HTTP $code)"
+            exit 1
+          fi
+
+          curl -sS --max-time 60 -H "Authorization: Bearer $TOKEN" \
+               "https://$SCM/api/vfs/site/wwwroot/assets/" -o /tmp/wwwroot-assets.json
+
+          python3 - <<'PY'
+          import json, re, sys
+
+          idx = open("/tmp/wwwroot-index.html", encoding="utf-8").read()
+          m = re.search(r"assets/(index-[\w-]+\.js)", idx)
+          if not m or len(idx) <= 500:
+              sys.exit(f"FAIL: deployed index.html is a stub "
+                       f"(len={len(idx)}, bundle_ref={bool(m)}).")
+          wanted = m.group(1)
+
+          listing = json.load(open("/tmp/wwwroot-assets.json", encoding="utf-8"))
+          sizes = {entry["name"]: entry["size"] for entry in listing}
+          if wanted not in sizes:
+              sys.exit(f"FAIL: index.html references {wanted}, which is not in "
+                       f"wwwroot/assets. Present: {sorted(sizes)[:10]}")
+          if sizes[wanted] <= 100_000:
+              sys.exit(f"FAIL: {wanted} is {sizes[wanted]} bytes on the server — "
+                       f"that is not a real bundle.")
+          print(f"OK: wwwroot/index.html is {len(idx)} bytes and points at "
+                f"{wanted} ({sizes[wanted] // 1024} KB on disk).")
+          PY
+
+      # Liveness for the public endpoint. A 401 is the CORRECT answer here (see
+      # above) and means pm2 is up and Easy Auth is in front of it; what this
+      # catches is the site being down altogether — 502, 503, or a connection
+      # that never completes. If Easy Auth is ever turned off, the 200 branch
+      # applies the same shell check the backend job uses.
+      - name: Verify the public URL is answering
+        run: |
+          for attempt in $(seq 1 30); do
+            code=$(curl -sS -o /tmp/public.html -w '%{http_code}' \
+                   --max-time 30 "$FRONTEND_URL/" || echo 000)
+            bytes=$(wc -c < /tmp/public.html 2>/dev/null || echo 0)
+            echo "attempt $attempt: HTTP $code, $bytes bytes"
+            case "$code" in
+              200)
+                if [ "$bytes" -gt 500 ] && grep -q 'assets/index-' /tmp/public.html; then
+                  echo "live shell OK: $(grep -o 'assets/index-[A-Za-z0-9_-]*\.js' /tmp/public.html | head -1)"
+                  exit 0
+                fi
+                ;;
+              401|302)
+                echo "HTTP $code — App Service Authentication is enabled and the"
+                echo "site is answering. Content was verified against wwwroot above."
+                exit 0
+                ;;
+            esac
+            sleep 10
+          done
+          echo "FAIL: $FRONTEND_URL never answered. Last body:"
+          head -c 400 /tmp/public.html
+          exit 1

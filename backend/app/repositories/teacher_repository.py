@@ -6,6 +6,8 @@ from datetime import date
 from app.models.teacher import Teacher
 from app.models.teacher_school_assignment import TeacherSchoolAssignment
 from app.models.student_teacher_assignment import StudentTeacherAssignment
+from app.models.role import Role
+from app.models.teacher_role import TeacherRole
 from app.models.school import School
 from app.models.student import Student
 
@@ -14,9 +16,27 @@ class TeacherRepository:
     def __init__(self, db: Session):
         self.db = db
 
+    def _get_active_roles_by_ids(self, role_ids: List[int]) -> List[Role]:
+        if not role_ids:
+            return []
+
+        roles = self.db.query(Role).filter(
+            Role.id.in_(role_ids),
+            Role.is_active == True
+        ).all()
+
+        if len(roles) != len(set(role_ids)):
+            raise ValueError("One or more role IDs are invalid or inactive")
+
+        return roles
+
     def create_teacher(self, teacher_data: Dict[str, Any]) -> Teacher:
         """Create a new teacher"""
+        role_ids = teacher_data.pop("role_ids", [])
+        self._get_active_roles_by_ids(role_ids)
+
         teacher = Teacher(**teacher_data)
+        teacher.teacher_roles = [TeacherRole(role_id=role_id) for role_id in role_ids]
         self.db.add(teacher)
         self.db.commit()
         self.db.refresh(teacher)
@@ -26,7 +46,8 @@ class TeacherRepository:
         """Get teacher by ID with related data"""
         return self.db.query(Teacher).options(
             joinedload(Teacher.school_assignments).joinedload(TeacherSchoolAssignment.school),
-            joinedload(Teacher.student_assignments).joinedload(StudentTeacherAssignment.student)
+            joinedload(Teacher.student_assignments).joinedload(StudentTeacherAssignment.student),
+            joinedload(Teacher.teacher_roles).joinedload(TeacherRole.role)
         ).filter(Teacher.id == teacher_id).first()
 
     def get_teacher_by_email(self, email: str) -> Optional[Teacher]:
@@ -37,6 +58,7 @@ class TeacherRepository:
         self,
         is_active: Optional[bool] = None,
         school_id: Optional[int] = None,
+        role_id: Optional[int] = None,
         department: Optional[str] = None,
         search: Optional[str] = None,
         skip: int = 0,
@@ -44,7 +66,10 @@ class TeacherRepository:
     ) -> List[Teacher]:
         """List teachers with optional filters"""
         query = self.db.query(Teacher).options(
-            joinedload(Teacher.school_assignments).joinedload(TeacherSchoolAssignment.school)
+            joinedload(Teacher.school_assignments).joinedload(TeacherSchoolAssignment.school),
+            joinedload(Teacher.teacher_roles).joinedload(TeacherRole.role),
+            joinedload(Teacher.students_as_teacher).joinedload(Student.school),
+            joinedload(Teacher.students_as_case_manager).joinedload(Student.school)
         )
 
         # Apply filters
@@ -52,11 +77,26 @@ class TeacherRepository:
             query = query.filter(Teacher.is_active == is_active)
 
         if school_id:
-            # Filter by current school assignment
-            query = query.join(TeacherSchoolAssignment).filter(
-                TeacherSchoolAssignment.school_id == school_id,
-                TeacherSchoolAssignment.end_date.is_(None)
+            query = query.outerjoin(
+                TeacherSchoolAssignment,
+                and_(
+                    TeacherSchoolAssignment.teacher_id == Teacher.id,
+                    TeacherSchoolAssignment.end_date.is_(None),
+                )
+            ).filter(
+                or_(
+                    TeacherSchoolAssignment.school_id == school_id,
+                    Teacher.students_as_teacher.any(
+                        and_(Student.school_id == school_id, Student.enrollment_status == "Active", Student.is_archived == False)
+                    ),
+                    Teacher.students_as_case_manager.any(
+                        and_(Student.school_id == school_id, Student.enrollment_status == "Active", Student.is_archived == False)
+                    )
+                )
             )
+
+        if role_id:
+            query = query.join(TeacherRole).filter(TeacherRole.role_id == role_id)
 
         if department:
             query = query.filter(Teacher.department.ilike(f"%{department}%"))
@@ -74,7 +114,7 @@ class TeacherRepository:
             )
 
         # Order by last name, first name and apply pagination
-        query = query.order_by(asc(Teacher.last_name), asc(Teacher.first_name))
+        query = query.distinct().order_by(asc(Teacher.last_name), asc(Teacher.first_name))
         return query.offset(skip).limit(limit).all()
 
     def update_teacher(self, teacher_id: int, update_data: Dict[str, Any]) -> Optional[Teacher]:
@@ -82,6 +122,11 @@ class TeacherRepository:
         teacher = self.db.query(Teacher).filter(Teacher.id == teacher_id).first()
         if not teacher:
             return None
+
+        role_ids = update_data.pop("role_ids", None)
+        if role_ids is not None:
+            self._get_active_roles_by_ids(role_ids)
+            teacher.teacher_roles = [TeacherRole(role_id=role_id) for role_id in role_ids]
 
         for field, value in update_data.items():
             if hasattr(teacher, field):
@@ -117,7 +162,17 @@ class TeacherRepository:
         """Get summary of all active teachers for dropdowns"""
         return self.db.query(Teacher).filter(
             Teacher.is_active == True
+        ).options(
+            joinedload(Teacher.teacher_roles).joinedload(TeacherRole.role),
+            joinedload(Teacher.students_as_teacher).joinedload(Student.school),
+            joinedload(Teacher.students_as_case_manager).joinedload(Student.school)
         ).order_by(asc(Teacher.last_name), asc(Teacher.first_name)).all()
+
+    def list_roles(self, active_only: bool = True) -> List[Role]:
+        query = self.db.query(Role)
+        if active_only:
+            query = query.filter(Role.is_active == True)
+        return query.order_by(asc(Role.name)).all()
 
     def assign_teacher_to_school(self, assignment_data: Dict[str, Any]) -> TeacherSchoolAssignment:
         """Create a teacher-school assignment"""

@@ -14,28 +14,23 @@ import {
   MenuItem,
   FormControl,
   InputLabel,
-  Chip,
-  Stack,
   Alert,
   CircularProgress,
-  Accordion,
-  AccordionSummary,
-  AccordionDetails,
   IconButton,
   Grid,
-  Divider
+  Table,
+  TableBody,
+  TableCell,
+  TableContainer,
+  TableHead,
+  TableRow
 } from '@mui/material';
 import {
   Add,
   Edit,
   Delete,
   ExpandMore,
-  TrackChanges,
-  TrendingUp,
-  CheckCircle,
-  PlayCircle,
-  PauseCircle,
-  StopCircle
+  TrackChanges
 } from '@mui/icons-material';
 import { useGoals } from '../lib/hooks/useGoals';
 import type {
@@ -127,34 +122,10 @@ export function GoalManagement({ studentId, studentName }: GoalManagementProps) 
     setDialogState({ type: null, mode: 'create' });
   };
 
-  const getStatusIcon = (status: string) => {
-    switch (status.toLowerCase()) {
-      case 'active':
-        return <PlayCircle color="success" />;
-      case 'mastered':
-        return <CheckCircle color="primary" />;
-      case 'on hold':
-        return <PauseCircle color="warning" />;
-      case 'discontinued':
-        return <StopCircle color="error" />;
-      default:
-        return <TrackChanges color="action" />;
-    }
-  };
-
-  const getStatusColor = (status: string) => {
-    switch (status.toLowerCase()) {
-      case 'active':
-        return 'success';
-      case 'mastered':
-        return 'primary';
-      case 'on hold':
-        return 'warning';
-      case 'discontinued':
-        return 'error';
-      default:
-        return 'default';
-    }
+  const getGoalCategoryLabel = (goal: IEPGoal) => {
+    if (goal.goal_category_name) return goal.goal_category_name;
+    const matchedCategory = goalCategories.find((category) => category.id === goal.goal_category_id);
+    return matchedCategory?.name || '-';
   };
 
   if (loading && goals.length === 0) {
@@ -167,45 +138,6 @@ export function GoalManagement({ studentId, studentName }: GoalManagementProps) 
 
   return (
     <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
-      {/* Header */}
-      <Box 
-        display="flex" 
-        justifyContent="space-between" 
-        alignItems="center" 
-        mb={3} 
-        sx={{ 
-          flexShrink: 0,
-          bgcolor: 'white',
-          p: 3,
-          borderRadius: 2,
-          boxShadow: '0 2px 8px rgba(0,0,0,0.1)',
-          border: '1px solid #e0e0e0'
-        }}
-      >
-        <Typography variant="h5" component="h2" sx={{ color: '#40A8B6', fontWeight: 600 }}>
-          IEP Goals {studentName && `- ${studentName}`}
-        </Typography>
-        <Button
-          variant="contained"
-          startIcon={<Add />}
-          onClick={handleCreateGoal}
-          sx={{
-            bgcolor: '#40A8B6',
-            '&:hover': {
-              bgcolor: '#369aa6'
-            },
-            textTransform: 'none',
-            fontWeight: 500,
-            px: 3,
-            py: 1.5,
-            borderRadius: 2,
-            boxShadow: '0 2px 4px rgba(64,168,182,0.3)'
-          }}
-        >
-          Add Goal
-        </Button>
-      </Box>
-
       {/* Error Alert */}
       {error && (
         <Alert severity="error" onClose={clearError} sx={{ mb: 2, flexShrink: 0 }}>
@@ -213,8 +145,8 @@ export function GoalManagement({ studentId, studentName }: GoalManagementProps) 
         </Alert>
       )}
 
-      {/* Goals List - Scrollable */}
-      <Box sx={{ flex: 1, overflow: 'auto', minHeight: 0, pb: 6 }}>
+      {/* Goals Grid - Scrollable */}
+      <Box sx={{ flex: 1, overflow: 'auto', minHeight: 0, pb: 2 }}>
         {goals.length === 0 ? (
         <Card sx={{ 
           bgcolor: 'white', 
@@ -252,111 +184,129 @@ export function GoalManagement({ studentId, studentName }: GoalManagementProps) 
           </CardContent>
         </Card>
       ) : (
-        <Stack spacing={3}>
-          {goals.map((goal) => (
-            <Accordion
-              key={goal.id}
-              expanded={expandedGoal === goal.id}
-              onChange={(_, isExpanded) => setExpandedGoal(isExpanded ? goal.id : null)}
-              sx={{
-                bgcolor: 'white',
-                borderRadius: '12px !important',
-                boxShadow: '0 2px 8px rgba(0,0,0,0.1)',
-                border: '1px solid #e0e0e0',
-                mb: 2,
-                '&:before': {
-                  display: 'none'
-                },
-                '&.Mui-expanded': {
-                  boxShadow: '0 4px 16px rgba(64,168,182,0.15)',
-                  borderColor: '#40A8B6'
-                }
-              }}
+        <Card sx={{ borderRadius: 2, border: '1px solid #e0e0e0', boxShadow: '0 2px 8px rgba(0,0,0,0.08)' }}>
+          <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', p: 1.5, borderBottom: '1px solid #e8f4f5' }}>
+            <Typography variant="subtitle1" sx={{ color: '#40A8B6', fontWeight: 700 }}>
+              Annual Goals {studentName && `- ${studentName}`}
+            </Typography>
+            <Button
+              variant="contained"
+              size="small"
+              startIcon={<Add />}
+              onClick={handleCreateGoal}
+              sx={{ bgcolor: '#40A8B6', '&:hover': { bgcolor: '#369aa6' }, textTransform: 'none', fontWeight: 500 }}
             >
-              <AccordionSummary 
-                expandIcon={<ExpandMore sx={{ color: '#40A8B6' }} />}
-                sx={{
-                  '& .MuiAccordionSummary-content': {
-                    my: 2
-                  },
-                  borderRadius: '12px',
-                  '&:hover': {
-                    bgcolor: '#f8fffe'
-                  }
-                }}
-              >
-                <Box display="flex" alignItems="center" width="100%" mr={2}>
-                  <Box display="flex" alignItems="center" flex={1}>
-                    {getStatusIcon(goal.goal_status)}
-                    <Box ml={2} flex={1}>
-                      <Typography variant="h6" sx={{ fontWeight: 600, color: '#333', mb: 1 }}>
-                        {goal.goal_number && (
-                          <span style={{ color: '#40A8B6', fontWeight: 700 }}>
-                            Goal {goal.goal_number}:
-                          </span>
-                        )} {goal.goal_description.length > 80
-                          ? `${goal.goal_description.substring(0, 80)}...`
-                          : goal.goal_description
-                        }
-                      </Typography>
-                      <Box display="flex" gap={1} mt={1} flexWrap="wrap">
-                        <Chip
-                          label={goal.goal_status}
-                          color={getStatusColor(goal.goal_status) as any}
-                          size="small"
-                          sx={{ 
-                            fontWeight: 500,
-                            '&.MuiChip-colorPrimary': {
-                              bgcolor: '#40A8B6',
-                              color: 'white'
-                            }
-                          }}
-                        />
-                        {goal.goal_category_name && (
-                          <Chip 
-                            label={goal.goal_category_name} 
-                            variant="outlined" 
-                            size="small"
+              Add Goal
+            </Button>
+          </Box>
+          <TableContainer sx={{ maxHeight: 520 }}>
+            <Table stickyHeader size="small">
+              <TableHead>
+                <TableRow>
+                  <TableCell sx={{ width: 56 }} />
+                  <TableCell sx={{ fontWeight: 700 }}>Annual Goal</TableCell>
+                  <TableCell sx={{ fontWeight: 700, width: 160 }}>Category</TableCell>
+                  <TableCell sx={{ fontWeight: 700, width: 110 }}>Objectives</TableCell>
+                  <TableCell align="right" sx={{ fontWeight: 700, width: 170 }}>Actions</TableCell>
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {goals.map((goal) => (
+                  <React.Fragment key={goal.id}>
+                    <TableRow hover>
+                      <TableCell>
+                        <IconButton size="small" onClick={() => setExpandedGoal(expandedGoal === goal.id ? null : goal.id)}>
+                          <ExpandMore
                             sx={{
-                              borderColor: '#40A8B6',
                               color: '#40A8B6',
-                              fontWeight: 500
+                              transform: expandedGoal === goal.id ? 'rotate(180deg)' : 'rotate(0deg)',
+                              transition: 'transform 0.2s ease'
                             }}
                           />
-                        )}
-                        <Chip
-                          label={`${goal.objectives?.length || 0} objectives`}
-                          variant="outlined"
-                          size="small"
-                          sx={{
-                            bgcolor: '#f0f9fa',
-                            borderColor: '#40A8B6',
-                            color: '#40A8B6',
-                            fontWeight: 500
-                          }}
-                        />
-                      </Box>
-                    </Box>
-                  </Box>
-                </Box>
-              </AccordionSummary>
-              <AccordionDetails sx={{ 
-                bgcolor: '#fafbfc', 
-                borderTop: '1px solid #e8f4f5',
-                p: 3
-              }}>
-                <GoalDetails
-                  goal={goal}
-                  onEditGoal={() => handleEditGoal(goal)}
-                  onDeleteGoal={() => handleDeleteGoal(goal.id)}
-                  onCreateObjective={() => handleCreateObjective(goal.id)}
-                  onEditObjective={(obj) => handleEditObjective(obj, goal.id)}
-                  onDeleteObjective={handleDeleteObjective}
-                />
-              </AccordionDetails>
-            </Accordion>
-          ))}
-        </Stack>
+                        </IconButton>
+                      </TableCell>
+                      <TableCell>
+                        <Typography sx={{ fontWeight: 600 }}>
+                          {goal.goal_number ? `Annual Goal ${goal.goal_number}: ` : ''}
+                          {goal.goal_description.length > 115
+                            ? `${goal.goal_description.substring(0, 115)}...`
+                            : goal.goal_description}
+                        </Typography>
+                      </TableCell>
+                      <TableCell>{getGoalCategoryLabel(goal)}</TableCell>
+                      <TableCell>{goal.objectives?.length || 0}</TableCell>
+                      <TableCell align="right">
+                        <IconButton size="small" onClick={() => handleEditGoal(goal)} sx={{ color: '#40A8B6' }} title="Edit Goal">
+                          <Edit fontSize="small" />
+                        </IconButton>
+                        <IconButton size="small" onClick={() => handleDeleteGoal(goal.id)} sx={{ color: '#f44336' }} title="Delete Goal">
+                          <Delete fontSize="small" />
+                        </IconButton>
+                      </TableCell>
+                    </TableRow>
+                    {expandedGoal === goal.id && (
+                      <TableRow>
+                        <TableCell colSpan={5} sx={{ bgcolor: '#fafbfc' }}>
+                          <Box sx={{ py: 1 }}>
+                            <Box display="flex" justifyContent="space-between" alignItems="center" mb={1}>
+                              <Typography variant="subtitle2" sx={{ color: '#40A8B6', fontWeight: 700 }}>
+                                Objectives
+                              </Typography>
+                              <Button
+                                variant="outlined"
+                                size="small"
+                                startIcon={<Add />}
+                                onClick={() => handleCreateObjective(goal.id)}
+                                sx={{ borderColor: '#40A8B6', color: '#40A8B6', textTransform: 'none' }}
+                              >
+                                Add Objective
+                              </Button>
+                            </Box>
+                            {!goal.objectives || goal.objectives.length === 0 ? (
+                              <Typography color="text.secondary">No objectives yet for this annual goal.</Typography>
+                            ) : (
+                              <TableContainer sx={{ border: '1px solid #e8f4f5', borderRadius: 1, bgcolor: 'white' }}>
+                                <Table size="small">
+                                  <TableHead>
+                                    <TableRow>
+                                      <TableCell sx={{ fontWeight: 700, width: 90 }}>Obj #</TableCell>
+                                      <TableCell sx={{ fontWeight: 700 }}>Objective Description</TableCell>
+                                      <TableCell sx={{ fontWeight: 700, width: 140 }}>Frequency</TableCell>
+                                      <TableCell sx={{ fontWeight: 700, width: 110 }}>Entries</TableCell>
+                                      <TableCell align="right" sx={{ fontWeight: 700, width: 90 }}>Actions</TableCell>
+                                    </TableRow>
+                                  </TableHead>
+                                  <TableBody>
+                                    {goal.objectives.map((objective) => (
+                                      <TableRow key={objective.id} hover>
+                                        <TableCell>Objective {objective.objective_number}</TableCell>
+                                        <TableCell>{objective.objective_description}</TableCell>
+                                        <TableCell>{objective.schedule_frequency || '-'}</TableCell>
+                                        <TableCell>{objective.progress_count}</TableCell>
+                                        <TableCell align="right">
+                                          <IconButton size="small" onClick={() => handleEditObjective(objective, goal.id)} sx={{ mr: 0.5, color: '#40A8B6' }}>
+                                            <Edit fontSize="small" />
+                                          </IconButton>
+                                          <IconButton size="small" onClick={() => handleDeleteObjective(objective.id)} sx={{ color: '#f44336' }}>
+                                            <Delete fontSize="small" />
+                                          </IconButton>
+                                        </TableCell>
+                                      </TableRow>
+                                    ))}
+                                  </TableBody>
+                                </Table>
+                              </TableContainer>
+                            )}
+                          </Box>
+                        </TableCell>
+                      </TableRow>
+                    )}
+                  </React.Fragment>
+                ))}
+              </TableBody>
+            </Table>
+          </TableContainer>
+        </Card>
         )}
       </Box>
 
@@ -383,321 +333,7 @@ export function GoalManagement({ studentId, studentName }: GoalManagementProps) 
         onCreate={createObjective}
         onUpdate={updateObjective}
       />
-    </Box>
-  );
-}
 
-// Goal Details Component
-interface GoalDetailsProps {
-  goal: IEPGoal;
-  onEditGoal: () => void;
-  onDeleteGoal: () => void;
-  onCreateObjective: () => void;
-  onEditObjective: (objective: GoalObjective) => void;
-  onDeleteObjective: (objectiveId: number) => void;
-}
-
-function GoalDetails({
-  goal,
-  onEditGoal,
-  onDeleteGoal,
-  onCreateObjective,
-  onEditObjective,
-  onDeleteObjective
-}: GoalDetailsProps) {
-  return (
-    <Box>
-      {/* Goal Information */}
-      <Box mb={3}>
-        <Box display="flex" justifyContent="space-between" alignItems="center" mb={3}>
-          <Typography variant="h6" sx={{ color: '#40A8B6', fontWeight: 600 }}>
-            Goal Details
-          </Typography>
-          <Box>
-            <IconButton 
-              onClick={onEditGoal} 
-              size="small"
-              sx={{
-                mr: 1,
-                color: '#40A8B6',
-                '&:hover': {
-                  bgcolor: 'rgba(64,168,182,0.1)'
-                }
-              }}
-            >
-              <Edit />
-            </IconButton>
-            <IconButton 
-              onClick={onDeleteGoal} 
-              size="small" 
-              sx={{
-                color: '#f44336',
-                '&:hover': {
-                  bgcolor: 'rgba(244,67,54,0.1)'
-                }
-              }}
-            >
-              <Delete />
-            </IconButton>
-          </Box>
-        </Box>
-        
-        <Grid container spacing={3}>
-          <Grid item xs={12} md={6}>
-            <Box sx={{ 
-              bgcolor: 'white', 
-              p: 2, 
-              borderRadius: 2, 
-              border: '1px solid #e0e0e0',
-              borderLeft: '4px solid #40A8B6'
-            }}>
-              <Typography variant="body2" sx={{ color: '#40A8B6', fontWeight: 600, mb: 1 }}>
-                Description
-              </Typography>
-              <Typography variant="body1">{goal.goal_description}</Typography>
-            </Box>
-          </Grid>
-          <Grid item xs={12} md={6}>
-            <Box sx={{ 
-              bgcolor: 'white', 
-              p: 2, 
-              borderRadius: 2, 
-              border: '1px solid #e0e0e0',
-              borderLeft: '4px solid #40A8B6'
-            }}>
-              <Typography variant="body2" sx={{ color: '#40A8B6', fontWeight: 600, mb: 1 }}>
-                Target Criteria
-              </Typography>
-              <Typography variant="body1">{goal.target_criteria}</Typography>
-            </Box>
-          </Grid>
-          {goal.target_behavior && (
-            <Grid item xs={12} md={6}>
-              <Box sx={{ 
-                bgcolor: 'white', 
-                p: 2, 
-                borderRadius: 2, 
-                border: '1px solid #e0e0e0',
-                borderLeft: '4px solid #40A8B6'
-              }}>
-                <Typography variant="body2" sx={{ color: '#40A8B6', fontWeight: 600, mb: 1 }}>
-                  Target Behavior
-                </Typography>
-                <Typography variant="body1">{goal.target_behavior}</Typography>
-              </Box>
-            </Grid>
-          )}
-          {goal.baseline_data && (
-            <Grid item xs={12} md={6}>
-              <Box sx={{ 
-                bgcolor: 'white', 
-                p: 2, 
-                borderRadius: 2, 
-                border: '1px solid #e0e0e0',
-                borderLeft: '4px solid #40A8B6'
-              }}>
-                <Typography variant="body2" sx={{ color: '#40A8B6', fontWeight: 600, mb: 1 }}>
-                  Baseline Data
-                </Typography>
-                <Typography variant="body1">{goal.baseline_data}</Typography>
-              </Box>
-            </Grid>
-          )}
-          <Grid item xs={12} md={6}>
-            <Box sx={{ 
-              bgcolor: '#f0f9fa', 
-              p: 2, 
-              borderRadius: 2, 
-              border: '1px solid #d0e8ec',
-              borderLeft: '4px solid #40A8B6'
-            }}>
-              <Typography variant="body2" sx={{ color: '#40A8B6', fontWeight: 600, mb: 1 }}>
-                Start Date
-              </Typography>
-              <Typography variant="body1">{new Date(goal.start_date).toLocaleDateString()}</Typography>
-            </Box>
-          </Grid>
-          {goal.end_date && (
-            <Grid item xs={12} md={6}>
-              <Box sx={{ 
-                bgcolor: '#f0f9fa', 
-                p: 2, 
-                borderRadius: 2, 
-                border: '1px solid #d0e8ec',
-                borderLeft: '4px solid #40A8B6'
-              }}>
-                <Typography variant="body2" sx={{ color: '#40A8B6', fontWeight: 600, mb: 1 }}>
-                  End Date
-                </Typography>
-                <Typography variant="body1">{new Date(goal.end_date).toLocaleDateString()}</Typography>
-              </Box>
-            </Grid>
-          )}
-        </Grid>
-      </Box>
-
-      <Divider sx={{ my: 4, borderColor: '#e8f4f5' }} />
-
-      {/* Objectives Section */}
-      <Box>
-        <Box display="flex" justifyContent="space-between" alignItems="center" mb={3}>
-          <Typography variant="h6" sx={{ color: '#40A8B6', fontWeight: 600 }}>
-            Objectives
-          </Typography>
-          <Button
-            variant="outlined"
-            size="small"
-            startIcon={<Add />}
-            onClick={onCreateObjective}
-            sx={{
-              borderColor: '#40A8B6',
-              color: '#40A8B6',
-              '&:hover': {
-                borderColor: '#369aa6',
-                bgcolor: 'rgba(64,168,182,0.05)'
-              },
-              textTransform: 'none',
-              fontWeight: 500
-            }}
-          >
-            Add Objective
-          </Button>
-        </Box>
-
-        {!goal.objectives || goal.objectives.length === 0 ? (
-          <Box 
-            textAlign="center" 
-            py={5}
-            sx={{
-              bgcolor: 'white',
-              borderRadius: 2,
-              border: '2px dashed #d0e8ec',
-              color: '#40A8B6'
-            }}
-          >
-            <Add sx={{ fontSize: 48, color: '#40A8B6', mb: 2 }} />
-            <Typography sx={{ color: '#40A8B6', fontWeight: 500, mb: 2 }}>
-              No objectives yet for this goal.
-            </Typography>
-            <Button 
-              variant="contained" 
-              startIcon={<Add />} 
-              onClick={onCreateObjective}
-              sx={{
-                bgcolor: '#40A8B6',
-                '&:hover': {
-                  bgcolor: '#369aa6'
-                },
-                textTransform: 'none',
-                fontWeight: 500
-              }}
-            >
-              Add First Objective
-            </Button>
-          </Box>
-        ) : (
-          <Box sx={{ maxHeight: '400px', overflow: 'auto' }}>
-            <Stack spacing={2}>
-              {goal.objectives.map((objective) => (
-                <Card 
-                  key={objective.id} 
-                  sx={{
-                    bgcolor: 'white',
-                    borderRadius: 2,
-                    border: '1px solid #e8f4f5',
-                    boxShadow: '0 2px 4px rgba(0,0,0,0.05)',
-                    '&:hover': {
-                      boxShadow: '0 4px 8px rgba(64,168,182,0.15)',
-                      borderColor: '#40A8B6'
-                    }
-                  }}
-                >
-                  <CardContent sx={{ p: 3 }}>
-                    <Box display="flex" justifyContent="space-between" alignItems="start">
-                      <Box flex={1}>
-                        <Typography 
-                          variant="subtitle1" 
-                          sx={{ 
-                            color: '#40A8B6', 
-                            fontWeight: 600, 
-                            mb: 1 
-                          }}
-                        >
-                          Objective {objective.objective_number}
-                        </Typography>
-                        <Typography variant="body2" sx={{ mb: 2, color: '#333' }}>
-                          {objective.objective_description}
-                        </Typography>
-                        <Box display="flex" gap={1} flexWrap="wrap">
-                          {objective.progress_status && (
-                            <Chip 
-                              label={objective.progress_status} 
-                              size="small"
-                              sx={{
-                                bgcolor: '#e8f4f5',
-                                color: '#40A8B6',
-                                fontWeight: 500
-                              }}
-                            />
-                          )}
-                          {objective.schedule_frequency && (
-                            <Chip 
-                              label={objective.schedule_frequency} 
-                              variant="outlined" 
-                              size="small"
-                              sx={{
-                                borderColor: '#40A8B6',
-                                color: '#40A8B6'
-                              }}
-                            />
-                          )}
-                          <Chip
-                            label={`${objective.progress_count} entries`}
-                            variant="outlined"
-                            size="small"
-                            icon={<TrendingUp sx={{ color: '#40A8B6' }} />}
-                            sx={{
-                              borderColor: '#40A8B6',
-                              color: '#40A8B6'
-                            }}
-                          />
-                        </Box>
-                      </Box>
-                      <Box>
-                        <IconButton 
-                          onClick={() => onEditObjective(objective)} 
-                          size="small"
-                          sx={{
-                            mr: 1,
-                            color: '#40A8B6',
-                            '&:hover': {
-                              bgcolor: 'rgba(64,168,182,0.1)'
-                            }
-                          }}
-                        >
-                          <Edit />
-                        </IconButton>
-                        <IconButton
-                          onClick={() => onDeleteObjective(objective.id)}
-                          size="small"
-                          sx={{
-                            color: '#f44336',
-                            '&:hover': {
-                              bgcolor: 'rgba(244,67,54,0.1)'
-                            }
-                          }}
-                        >
-                          <Delete />
-                        </IconButton>
-                      </Box>
-                    </Box>
-                  </CardContent>
-                </Card>
-              ))}
-            </Stack>
-          </Box>
-        )}
-      </Box>
     </Box>
   );
 }

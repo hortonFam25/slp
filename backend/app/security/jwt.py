@@ -10,6 +10,10 @@ class TokenClaims(BaseModel):
     iss: Optional[str] = None
     name: Optional[str] = None
     preferred_username: Optional[str] = None
+    email: Optional[str] = None
+    upn: Optional[str] = None
+    unique_name: Optional[str] = None
+    oid: Optional[str] = None
 
 
 def validate_jwt(token: str) -> TokenClaims:
