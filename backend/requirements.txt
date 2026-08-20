@@ -26,4 +26,9 @@ openai-agents==0.8.4
 openai>=2.19.0
 mcp==1.26.0
 python-multipart==0.0.9
+# Reads the .xlsx half of the blind staged import (app/services/blind_import.py).
+# Loaded with data_only=True so a formula cell yields its cached VALUE rather
+# than its text -- `=CONCATENATE(B2," ",A2)` names a child as surely as the cell
+# it computes.
+openpyxl==3.1.5
 

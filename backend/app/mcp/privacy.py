@@ -194,6 +194,17 @@ _ALWAYS_REMOVED_KEYS = frozenset(
         "streetaddress",
         "homeaddress",
         "mailingaddress",
+        # The staged-import tables. `import_rows.cells_json` is the uploaded
+        # spreadsheet verbatim — names, birthdays, identifiers — and the whole
+        # design of the blind import rests on it never reaching a model. The
+        # import tools do not return it; this entry is the floor under that, so
+        # a future refactor that widens a payload cannot open the hole.
+        "cells",
+        "cellsjson",
+        "rawcells",
+        "rawrow",
+        "rowcells",
+        "cellvalues",
     }
 )
 
@@ -711,3 +722,618 @@ def sanitize_error_message(message: str, contexts: Sequence[StudentAliasContext]
     result does.
     """
     return scrub_text(message, contexts)
+
+
+# ---------------------------------------------------------------------------
+# shape masking -- the staged-import preview
+# ---------------------------------------------------------------------------
+# Everything above this line protects students the app ALREADY KNOWS: the
+# scrubber recognises a name because that name is on the roster it was built
+# from. A caseload arriving in a spreadsheet is the exact case that defends
+# against nothing -- not one of those children exists yet, so there is no
+# roster entry to match and no alias to rewrite them to.
+#
+# So the import surface inverts the default. Instead of "show the value unless
+# we recognise it as PII", it is "show the SHAPE of the value, always, and
+# reveal a real value only where a human has already told us what that column
+# means AND the meaning is on a short allow-list". A shape carries the thing an
+# agent actually needs in order to propose a mapping -- is this column dates,
+# digits, a Capitalised Word, "Last, First"? -- and carries no identity.
+
+# Beyond this many characters a shape is truncated. A long shape is a
+# free-text cell, where the pattern of punctuation in a 400-character note is
+# itself a fingerprint; nothing about mapping a column needs more than this.
+SHAPE_MAX_LENGTH = 24
+
+# What a truncated shape ends with. ASCII on purpose: this string travels
+# through JSON, terminals and transcripts, and an ellipsis character renders
+# differently in all three.
+SHAPE_TRUNCATION_MARKER = "..."
+
+# How many distinct shapes a column summary reports, most frequent first.
+SHAPE_SAMPLE_LIMIT = 3
+
+# How many real values a SAFE_REVEAL column may show once it has been mapped.
+SAFE_REVEAL_SAMPLE_LIMIT = 5
+
+# The fields a spreadsheet column may be mapped to. `ignore` is a real choice,
+# not an absence: saying "this column is junk" is how the agent tells us it
+# looked and decided, which is different from having missed it.
+IMPORT_FIELDS = (
+    "first_name",
+    "last_name",
+    "full_name_last_first",
+    "full_name_first_last",
+    "date_of_birth",
+    "uic",
+    "school",
+    "teacher",
+    "case_manager",
+    "grade_level",
+    "enrollment_status",
+    "iep_date",
+    "annual_review_due_date",
+    "reevaluation_due_date",
+    "eligibility",
+    "notes",
+    "ignore",
+)
+
+# Mapped fields whose real values may be shown to the model, and ONLY after a
+# mapping has been set. Every one of these is ORGANISATIONAL: which building,
+# which adult, which grade, which compliance date, which state eligibility
+# category. None of them identifies a child on its own, and all of them have to
+# be readable for the agent to do the one job it is here for -- reconciling the
+# spreadsheet's spelling of a school or a teacher against the ones this
+# database already holds.
+SAFE_REVEAL_FIELDS = frozenset(
+    {
+        "school",
+        "teacher",
+        "case_manager",
+        "grade_level",
+        "enrollment_status",
+        "iep_date",
+        "annual_review_due_date",
+        "reevaluation_due_date",
+        "eligibility",
+    }
+)
+
+# Never revealed, whatever a mapping claims. The first six are direct
+# identifiers. `notes` is here because it is the field whose CONTENT is
+# unbounded by definition -- a "comments" column in a district export is where
+# a diagnosis, a parent's phone number or a sibling's name ends up -- and
+# `ignore` is here because an unmapped column is exactly the one nobody has
+# looked at.
+NEVER_REVEAL_FIELDS = frozenset(
+    {
+        "first_name",
+        "last_name",
+        "full_name_last_first",
+        "full_name_first_last",
+        "date_of_birth",
+        "uic",
+        "notes",
+        "ignore",
+    }
+)
+
+# Header text is the ONE thing the preview reveals verbatim, because a mapping
+# cannot be proposed without it. This caps how much: a merged banner cell
+# reading "Speech caseload for Jane Ramirez, Northgate, 2026" is a header row
+# by every heuristic, and the cap is what stops the whole banner going out.
+HEADER_TEXT_MAX_LENGTH = 60
+
+# A row is a header-row CANDIDATE when more than this fraction of its non-empty
+# cells are non-numeric text. Data rows in a caseload export carry identifiers,
+# dates and grade numbers; a header row is words.
+#
+# Being a candidate is NOT enough to have your text shown -- see
+# `header_reveal_rows`, which is where the actual reveal decision lives and
+# where three further gates sit. This one only decides which rows are worth
+# considering, and being wrong here costs nothing.
+HEADER_TEXT_RATIO = 0.5
+
+# How far down a sheet the header hunt looks. A header below row 20 is not a
+# header, it is a second table, and the mapping's `header_row` can name it
+# explicitly if a therapist says so.
+HEADER_SCAN_ROWS = 20
+
+# A heading is a LABEL: short, mostly letters, no year in it. Longer than this
+# and the cell is prose, and prose in the top-left of a caseload export is a
+# sentence about a child.
+HEADER_LABEL_MAX_LENGTH = 40
+
+# A candidate row populated across at least this share of the sheet's width is
+# taken to BE the header row: the hunt stops there and nothing below it is ever
+# revealed. Rows above it are banners and titles, which is why the hunt does not
+# simply stop at the first candidate.
+HEADER_FULL_WIDTH_RATIO = 0.8
+
+# A header cell must be shaped UNLIKE the column beneath it. This is the gate
+# that catches the genuinely dangerous case -- a file with no header row at all,
+# whose first row is a child and passes every "looks like words" test. At least
+# this share of a candidate row's populated cells must differ in shape from the
+# most common shape in their own column below.
+HEADER_DIFFERENCE_RATIO = 0.5
+
+# How many rows below a candidate are sampled to work out a column's usual
+# shape. Enough to be representative, few enough to stay cheap on a 5000-row
+# file.
+HEADER_BODY_SAMPLE_ROWS = 50
+
+# More than this share of a column's populated cells must share one shape class
+# before that column is allowed to VOUCH for the row above it.
+#
+# "This cell is shaped unlike the column below it" is only evidence of a
+# heading when there is a column below it. A sheet laid out sideways -- one
+# student per COLUMN, "Student / DOB / Building" running down the left -- has no
+# columns in that sense: every cell below the first row is a different kind of
+# thing, so every cell of row 1 differs from "its column", and row 1 (which is
+# a list of children's names) qualified as a header row by unanimous vote.
+HEADER_COLUMN_CONSISTENCY = 0.5
+
+# And a column has to have at least this many populated cells below the
+# candidate before its consistency means anything. One cell is always 100%
+# consistent with itself, so a sheet of two rows let row 2 vouch for row 1 on
+# the strength of being one row -- and two children's names differ in structure
+# often enough ("Van Der Berg, Anna" against "Smith, Bob") for that to be a
+# reveal. Two cells is the least that can disagree.
+HEADER_COLUMN_MIN_SAMPLE = 2
+
+# Beyond this many characters a mapped value is not quoted verbatim however it
+# was mapped. A building and an adult have short names; a cell longer than this
+# is a sentence, and a sentence in a caseload export is about a child.
+REVEAL_VALUE_MAX_LENGTH = 60
+
+# How many digits a value with no letters in it may carry and still be quoted.
+# "12" is a grade. "4820193746" is a state identifier.
+REVEAL_MAX_BARE_DIGITS = 3
+
+# A year, or a date. Either one in a cell means it is data, not a label.
+_YEAR = re.compile(r"\d{4}")
+_DATE_ISH = re.compile(r"\d{1,4}[-/.]\d{1,2}[-/.]\d{1,4}")
+
+# A month NAME, bounded on both sides so "March" matches and "Marshall" does
+# not. A month word next to a digit is a date in the one spelling `_DATE_ISH`
+# and `_YEAR` between them cannot see: "9-May-13".
+_MONTH_WORD = re.compile(r"\b(?:" + _MONTHS + r")\b", re.IGNORECASE)
+
+
+def mask_value(value: Any) -> Optional[str]:
+    """
+    One cell -> its SHAPE. "Ramirez" -> "Xxxxxxx". "3/17/2011" -> "#/##/####".
+
+    Letters become X or x (case preserved, because "Last, First" and "LAST,
+    FIRST" are different export conventions and the agent has to be able to
+    tell them apart), digits become #, and everything else -- spaces, commas,
+    slashes, hyphens -- survives, because punctuation is the part that says
+    what a column IS.
+
+    Empty, whitespace-only and None all come back as None rather than as an
+    empty shape: "this cell has nothing in it" is a fact worth reporting
+    distinctly from "this cell holds a zero-length string".
+
+    Deterministic, offline and one-way: nothing here is reversible, and two
+    different children with the same-length name produce the same shape, which
+    is the point.
+
+    Accents are composed away first. A name arriving in NFD is a base letter
+    plus a free-standing combining mark, and a combining mark is not
+    `isalpha()` -- so without this the shape of "Jose" would come back as
+    "Xxxx" and the shape of the same name spelled with a decomposed acute would
+    come back as "Xxxx́", which is a fingerprint saying "this one has an
+    accent on the fourth letter". Same treatment the roster scrubber gives a
+    name, for the same reason.
+    """
+    if value is None:
+        return None
+    text = value if isinstance(value, str) else str(value)
+    text = unicodedata.normalize("NFC", text).strip()
+    if not text:
+        return None
+
+    out: list[str] = []
+    for char in text:
+        if unicodedata.combining(char):
+            continue
+        if char.isdigit():
+            out.append("#")
+        elif char.isalpha():
+            out.append("X" if char.isupper() else "x")
+        else:
+            out.append(char)
+        # Strictly greater: a value that is exactly SHAPE_MAX_LENGTH long is
+        # reported whole rather than marked as truncated when nothing was.
+        if len(out) > SHAPE_MAX_LENGTH:
+            return "".join(out[:SHAPE_MAX_LENGTH]) + SHAPE_TRUNCATION_MARKER
+    return "".join(out)
+
+
+def mask_header(value: Any) -> Optional[str]:
+    """
+    A header cell -> the text an agent maps against, truncated.
+
+    Deliberately NOT `mask_value`: a masked header is useless (nobody can map
+    "Xxxxx Xxxx" to `first_name`), so this is a bounded, intentional reveal and
+    the only one in the preview stage. It is still run through the roster scrub
+    by the tool decorator on the way out, so a header that happens to be an
+    EXISTING student's name comes back as that student's alias.
+    """
+    if value is None:
+        return None
+    text = (value if isinstance(value, str) else str(value)).strip()
+    if not text:
+        return None
+    if len(text) > HEADER_TEXT_MAX_LENGTH:
+        return text[:HEADER_TEXT_MAX_LENGTH] + SHAPE_TRUNCATION_MARKER
+    return text
+
+
+def _looks_numeric(text: str) -> bool:
+    try:
+        float(text.replace(",", ""))
+    except ValueError:
+        return False
+    return True
+
+
+def summarize_column(column: str, header: Any, values: Sequence[Any]) -> dict:
+    """
+    One column of one sheet, described without quoting any of it.
+
+    Reports: the column letter, the header text, how many cells are non-empty,
+    how many DISTINCT values there are (a count, never the values -- a column
+    with 28 distinct values across 28 rows is an identifier and a column with 3
+    is a category, and that is all the agent needs to tell them apart), and the
+    three commonest shapes with their frequencies.
+
+    The distinct COUNT is deliberately not a distinct LIST even for columns
+    that look categorical: at the preview stage nobody has said yet which
+    column is the school and which is the child's surname, and a
+    three-distinct-values column in a small file is as likely to be a family as
+    a building.
+    """
+    shapes: dict[str, int] = {}
+    distinct: set[str] = set()
+    non_empty = 0
+
+    for value in values:
+        shape = mask_value(value)
+        if shape is None:
+            continue
+        non_empty += 1
+        text = value if isinstance(value, str) else str(value)
+        distinct.add(text.strip().casefold())
+        shapes[shape] = shapes.get(shape, 0) + 1
+
+    # Sorted by frequency, then by the shape itself, so two identical files
+    # always produce the same summary -- an unstable preview is a mapping
+    # proposal that changes for no reason.
+    top = sorted(shapes.items(), key=lambda item: (-item[1], item[0]))
+    return {
+        "column": column,
+        "header": mask_header(header),
+        "nonEmpty": non_empty,
+        "distinctValues": len(distinct),
+        "topShapes": [
+            {"shape": shape, "count": count} for shape, count in top[:SHAPE_SAMPLE_LIMIT]
+        ],
+    }
+
+
+def is_header_row(cells: Sequence[Any]) -> bool:
+    """
+    Does this row look like column headings?
+
+    The heuristic named in the design: more than half of the non-empty cells
+    are text that is not a number.
+
+    A CANDIDATE, only. Being wrong here is cheap because nothing is revealed on
+    the strength of it -- `header_reveal_rows` decides that, and this is merely
+    the cheap first pass it filters.
+    """
+    populated = [c for c in cells if mask_value(c) is not None]
+    if not populated:
+        return False
+    texty = 0
+    for cell in populated:
+        text = (cell if isinstance(cell, str) else str(cell)).strip()
+        if _looks_numeric(text):
+            continue
+        if any(char.isalpha() for char in text):
+            texty += 1
+    return texty > HEADER_TEXT_RATIO * len(populated)
+
+
+def looks_like_label(value: Any) -> bool:
+    """
+    Is this cell a column HEADING rather than a value?
+
+    Three cheap tests, each aimed at a way a data cell talks its way into being
+    printed:
+
+    * length -- a heading is a label, not a sentence. "Comments about services
+      provided to this student" is at the edge; a 200-character cell is prose.
+    * a four-digit run -- that is a year or an identifier. Headings do not carry
+      years; birthdays, IEP dates and UICs do.
+    * a date-shaped run -- "3/17/11" has no four-digit year and would otherwise
+      sail through.
+
+    * a comma or an apostrophe -- the punctuation of a PERSON. "Ramirez,
+      Sofia" and "O'Brien" are the two commonest spellings of a name in a
+      district export, and no column heading has ever needed either. This is
+      the cheapest gate here and the highest-precision one: it does not ask
+      whether a cell looks like a name in general, only whether it is punctuated
+      the way names are and headings are not.
+
+    Plus the obvious floor: a cell with no letters at all is not a heading, and
+    a cell with more digits than letters is data wearing a word.
+    """
+    if value is None:
+        return False
+    text = (value if isinstance(value, str) else str(value)).strip()
+    if not text or len(text) > HEADER_LABEL_MAX_LENGTH:
+        return False
+    if _YEAR.search(text) or _DATE_ISH.search(text):
+        return False
+    if "," in text or "'" in text or "’" in text:
+        return False
+    letters = sum(1 for char in text if char.isalpha())
+    if letters == 0:
+        return False
+    return sum(1 for char in text if char.isdigit()) <= letters
+
+
+def shape_class(value: Any) -> Optional[str]:
+    """
+    A cell -> its shape with every run collapsed. "Ramirez, Sofia" -> "Xx, Xx".
+
+    The difference from `mask_value` is LENGTH, and it is the whole point.
+    Two surnames are the same KIND of thing and different lengths, so their
+    exact shapes differ -- which meant a first data row could be declared
+    "shaped unlike the column beneath it" purely by being a different number of
+    letters from the row under it, which is the one thing a data row always is.
+
+    Collapsing runs asks the question that was meant: is this cell the same
+    kind of thing as the column below it? "Xxxxxxx" (a heading) and
+    "Xxxxxxx, Xxxxx" (a name) are different kinds. "Xxxxxxxxxxxx, Xxxxx" and
+    "Xxxx, Xxxxxxx" are the same kind in two sizes.
+    """
+    shape = mask_value(value)
+    if shape is None:
+        return None
+    out: list[str] = []
+    for char in shape:
+        if out and out[-1] == char:
+            continue
+        out.append(char)
+    return "".join(out)
+
+
+def _consistent_shape_class(values: Iterable[Any]) -> Optional[str]:
+    """
+    The shape class this column is made of, or None if it is not made of one.
+
+    None means two different things to the caller and both are "no evidence":
+    the column is empty, or the column is a jumble. A jumble is not a column and
+    cannot testify about the row above it -- see `HEADER_COLUMN_CONSISTENCY`.
+    """
+    counts: dict[str, int] = {}
+    total = 0
+    for value in values:
+        shape = shape_class(value)
+        if shape is None:
+            continue
+        total += 1
+        counts[shape] = counts.get(shape, 0) + 1
+    if total < HEADER_COLUMN_MIN_SAMPLE:
+        return None
+    modal, seen = max(counts.items(), key=lambda item: (item[1], item[0]))
+    if seen <= HEADER_COLUMN_CONSISTENCY * total:
+        return None
+    return modal
+
+
+def _differs_from_the_column(cells: Sequence[Any], below: Sequence[Sequence[Any]]) -> bool:
+    """
+    Is this row shaped UNLIKE the rows under it?
+
+    The gate that catches the case none of the others can: a spreadsheet with no
+    header row at all, whose first row is a child, whose cells are short words
+    with no digits in them, and which therefore passes every "looks like a
+    heading" test ever written.
+
+    A real heading does not look like its own column -- "Student" over a column
+    of "Xxxxxxx, Xxxxx", "DOB" over a column of "##/##/####". A first data row
+    looks exactly like its column, because it IS one. So the shape CLASS of each
+    populated cell is compared with the commonest class in that column below,
+    and a majority have to differ.
+
+    Class, not shape: see `shape_class`. Comparing exact shapes made "a name
+    four letters longer than the name below it" count as a difference, so a
+    two-row header-less sheet printed its first child as a heading.
+
+    A row with nothing under it never qualifies. There is no column to be unlike,
+    and a one-row sheet has no students to import anyway.
+    """
+    sample = list(below[:HEADER_BODY_SAMPLE_ROWS])
+    if not sample:
+        return False
+
+    populated = 0
+    different = 0
+    for index, cell in enumerate(cells):
+        shape = shape_class(cell)
+        if shape is None:
+            continue
+        populated += 1
+        modal = _consistent_shape_class(
+            row[index] if index < len(row) else None for row in sample
+        )
+        # No column below, or no consistent one: no evidence either way, and
+        # "no evidence" must not read as "differs". Counting it as a difference
+        # is what let a sideways sheet nominate its first row -- a row of
+        # children -- as the header.
+        if modal is not None and modal != shape:
+            different += 1
+    if populated == 0:
+        return False
+    return different > HEADER_DIFFERENCE_RATIO * populated
+
+
+def _typical_width(parsed: Sequence[tuple[int, Sequence[Any]]]) -> int:
+    """
+    How many cells a row of this sheet USUALLY fills.
+
+    Not the widest row: a single "prepared by the district data team" line under
+    a four-column table made the widest row six, so the real header row never
+    counted as full-width, the header scan never stopped, and the rows below it
+    -- children -- were considered as headings in their own right.
+
+    Ties break toward the narrower count, because this number only decides when
+    the scan STOPS. Stopping too early costs a header nobody gets to read;
+    stopping too late costs a child.
+    """
+    counts: dict[int, int] = {}
+    for _, cells in parsed:
+        populated = sum(1 for cell in cells if mask_value(cell) is not None)
+        if populated:
+            counts[populated] = counts.get(populated, 0) + 1
+    if not counts:
+        return 0
+    most = max(counts.values())
+    return min(width for width, seen in counts.items() if seen == most)
+
+
+def header_reveal_rows(
+    parsed: Sequence[tuple[int, Sequence[Any]]], limit: int = 3
+) -> list[int]:
+    """
+    Which rows' TEXT the preview may show, as spreadsheet row numbers.
+
+    This function is the entire verbatim-reveal policy of the preview stage, so
+    it is worth being explicit about what it is defending against. Showing
+    header text is unavoidable -- nobody can map "Xxxxx Xxxx" to `first_name`.
+    Showing the text of a row that turned out to be a child is a breach. There
+    is no structural property that distinguishes the two with certainty, so the
+    answer is four independent gates and a hard stop:
+
+      1. `is_header_row` -- the row is mostly words.
+      2. `looks_like_label` on EVERY populated cell -- short, letter-heavy, no
+         year, no date. This alone rejects any row carrying a birthday or a UIC.
+      3. `_differs_from_the_column` -- the row is shaped unlike the rows beneath
+         it, which is what a heading is and what a first data row is not.
+      4. At least two populated cells, so a single merged banner cell -- the
+         one most likely to read "Speech caseload for Jane Ramirez" -- is never
+         printed. Losing a banner costs nothing: no mapping is made of it.
+
+    And the stop: the scan runs from the top and ENDS at the first qualifying
+    row that spans most of the sheet's width. That row is the header; everything
+    below it is data and is never considered, however heading-like it looks.
+    The scan also never goes past `HEADER_SCAN_ROWS`.
+
+    Several rows can qualify only in the narrow case of banner rows above a
+    header, which is why a list comes back rather than one number.
+    """
+    rows = list(parsed[:HEADER_SCAN_ROWS])
+    if not rows:
+        return []
+    width = _typical_width(parsed)
+
+    out: list[int] = []
+    for position, (row_index, cells) in enumerate(rows):
+        populated = [cell for cell in cells if mask_value(cell) is not None]
+        if len(populated) < 2:
+            continue
+        if not is_header_row(cells):
+            continue
+        if not all(looks_like_label(cell) for cell in populated):
+            continue
+        below = [row_cells for _, row_cells in parsed[position + 1 :]]
+        if not _differs_from_the_column(cells, below):
+            continue
+
+        out.append(row_index)
+        if len(out) >= limit:
+            break
+        if width and len(populated) >= HEADER_FULL_WIDTH_RATIO * width:
+            break
+    return out
+
+
+def revealable_value(value: Any) -> bool:
+    """
+    May this CELL be quoted verbatim, whatever a mapping claims it is?
+
+    The allow-list in `SAFE_REVEAL_FIELDS` gates on the FIELD, and a field is
+    whatever the caller said it was. That is fine against a mistake and useless
+    against a lie, and the caller here is a model that may be doing what the
+    conversation told it to rather than what the therapist asked for. So a
+    second gate sits on the value itself, and it is the one that cannot be
+    talked around: a date, a long identifier or a paragraph is never printed,
+    even from a column somebody has labelled `school`.
+
+    What survives is what an organisational value actually looks like:
+    "Northgate Elementary", "Marla Pennington", "SLI", "Bldg 4", "K", "12".
+    What does not: "2013-05-09", "3/17/2011", "9-May-13", "4820193746", and
+    anything longer than a name.
+
+    This does NOT make a mislabelled name column safe -- a surname is a short
+    letter-only word and no test can tell it from a small school's name. That
+    residual is why `validate` refuses to write anything it cannot resolve, and
+    why the quoted list is capped. What this closes is the two categories the
+    tools promise unconditionally: birthdays and identifiers.
+    """
+    if value is None:
+        return False
+    text = (value if isinstance(value, str) else str(value)).strip()
+    if not text or len(text) > REVEAL_VALUE_MAX_LENGTH:
+        return False
+    # A four-digit run is a year or an identifier; a date shape is a date.
+    if _YEAR.search(text) or _DATE_ISH.search(text):
+        return False
+    digits = sum(1 for char in text if char.isdigit())
+    letters = sum(1 for char in text if char.isalpha())
+    if digits and _MONTH_WORD.search(text):
+        return False
+    if letters == 0:
+        return 0 < digits <= REVEAL_MAX_BARE_DIGITS
+    return digits <= letters or digits <= REVEAL_MAX_BARE_DIGITS
+
+
+def reveal_samples(
+    values: Sequence[Any],
+    contexts: Sequence[StudentAliasContext],
+    limit: int = SAFE_REVEAL_SAMPLE_LIMIT,
+) -> list[str]:
+    """
+    Up to `limit` distinct real values from ONE allow-listed column.
+
+    Two gates have already been passed before this is called: the column was
+    mapped by a deliberate decision, and the field it was mapped to is in
+    `SAFE_REVEAL_FIELDS`. This adds two more: `revealable_value`, which asks
+    whether the cell looks like the KIND of thing the allow-list is for, and
+    the roster scrub -- a school or teacher cell that happens to contain an
+    EXISTING student's name comes out as that student's alias.
+
+    Order is first-seen, so the samples read like the top of the column rather
+    than like a shuffled set.
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    for value in values:
+        if mask_value(value) is None:
+            continue
+        text = (value if isinstance(value, str) else str(value)).strip()
+        key = text.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        if not revealable_value(text):
+            continue
+        out.append(scrub_text(text, contexts))
+        if len(out) >= limit:
+            break
+    return out

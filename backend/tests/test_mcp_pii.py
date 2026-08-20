@@ -49,6 +49,22 @@ S2_LAST = "Marchetti"
 S2_UIC = "UICSENTINEL456"
 S2_DOB = date(2009, 7, 23)
 
+# Two more children, who exist ONLY inside a staged spreadsheet import and are
+# not in the students table when the import tools run. That is the whole point
+# of them: the free-text scrubber cannot help here, because it redacts against
+# a roster and these two are not on it. Whatever keeps them out of a payload is
+# the masking layer in `app.mcp.privacy`, not the roster, and this is where
+# that gets checked alongside everything else.
+I1_FIRST = "Wynstanleigh"
+I1_LAST = "Krzywicki"
+I1_UIC = "UICSENTINEL789"
+I1_DOB = date(2013, 5, 9)
+
+I2_FIRST = "Perceval"
+I2_LAST = "Featherstonehaugh"
+I2_UIC = "UICSENTINEL790"
+I2_DOB = date(2012, 8, 14)
+
 def _dob_spellings(value: date) -> tuple[str, ...]:
     """A birthday is a value, not a string, and the assertion has to know that.
 
@@ -81,6 +97,18 @@ SENTINELS = (
     f"{S2_FIRST} {S2_LAST}",
     S2_UIC,
     *_dob_spellings(S2_DOB),
+    I1_FIRST,
+    I1_LAST,
+    f"{I1_FIRST} {I1_LAST}",
+    f"{I1_LAST}, {I1_FIRST}",
+    I1_UIC,
+    *_dob_spellings(I1_DOB),
+    I2_FIRST,
+    I2_LAST,
+    f"{I2_FIRST} {I2_LAST}",
+    f"{I2_LAST}, {I2_FIRST}",
+    I2_UIC,
+    *_dob_spellings(I2_DOB),
 )
 
 # Field names that must not survive anywhere in a payload, at any depth, in any
@@ -105,6 +133,16 @@ DENYLISTED_KEYS = frozenset(
         "phone",
         "phonenumber",
         "address",
+        # The staged import's raw spreadsheet rows. `import_rows.cells_json` is
+        # the uploaded file verbatim; no tool returns it and `app.mcp.privacy`
+        # drops the key structurally, so a payload that grows one is a
+        # regression rather than a design change.
+        "cells",
+        "cellsjson",
+        "rawcells",
+        "rawrow",
+        "rowcells",
+        "cellvalues",
     }
 )
 
@@ -160,6 +198,8 @@ def seed(client):
     from app.models.student import Student
     from app.models.teacher import Teacher
     from app.models.therapy_session import TherapySession
+    from app.models.user import User
+    from app.services import blind_import
 
     db = SessionLocal()
     try:
@@ -280,10 +320,62 @@ def seed(client):
         db.add(appointment)
         db.commit()
 
+        # A user to own the staged import, because a batch is personal and its
+        # user_id is a real foreign key.
+        user = User(
+            external_auth_id="pytest-mcp-pii",
+            email="pii-suite@example.invalid",
+            display_name="Pytest Therapist",
+            role="therapist",
+            is_active=True,
+        )
+        db.add(user)
+        db.commit()
+
+        # A staged spreadsheet, so the six import tools are exercised for real
+        # rather than merely marked. Its two children are NOT in the students
+        # table, which is what makes the sentinel search over the import tools'
+        # output mean something: the roster scrubber has never heard of them.
+        batch, _secret = blind_import.create_batch(db, user.id)
+        blind_import.store_rows(
+            db,
+            batch,
+            [
+                {
+                    "name": "Caseload",
+                    "rows": [
+                        (1, ["Student", "DOB", "State ID", "Building", "Teacher"]),
+                        (
+                            2,
+                            [
+                                f"{I1_LAST}, {I1_FIRST}",
+                                I1_DOB.isoformat(),
+                                I1_UIC,
+                                school.name,
+                                f"{teacher.first_name} {teacher.last_name}",
+                            ],
+                        ),
+                        (
+                            3,
+                            [
+                                f"{I2_LAST}, {I2_FIRST}",
+                                I2_DOB.isoformat(),
+                                I2_UIC,
+                                school.name,
+                                f"{teacher.first_name} {teacher.last_name}",
+                            ],
+                        ),
+                    ],
+                }
+            ],
+        )
+
         return {
             "student_one": one.id,
             "student_two": two.id,
             "alias_one": f"student_{one.id}",
+            "user": user.id,
+            "batch": batch.id,
             "school": school.id,
             "teacher": teacher.id,
             "category": category.id,
@@ -309,7 +401,9 @@ def principal(seed):
     from app.mcp.auth import McpPrincipal
 
     return McpPrincipal(
-        user_id=4242,
+        # A REAL user row, because the staged import batch in `seed` belongs to
+        # it and `import_batches.user_id` is a foreign key.
+        user_id=seed["user"],
         token_id=1,
         user_name="Pytest Therapist",
         role="therapist",
@@ -411,6 +505,42 @@ ARG_FACTORY = {
     "update_student": lambda s: {"student_id": s["student_one"], "grade_level": "4"},
     "delete_progress_entry": lambda s: {"entry_id": s["entry"], "confirm": False},
     "delete_goal": lambda s: {"goal_id": s["goal"], "confirm": False},
+    # The staged import, in the order the tools are registered -- which is the
+    # order `test_no_tool_leaks_student_pii` walks the registry in, and the
+    # order the flow actually runs in. Preview, mapping, validation and the
+    # commit all execute against the batch seeded above, so what the sentinel
+    # search reads is real output and not an empty stub.
+    "create_import_upload": lambda s: {},
+    "get_import_preview": lambda s: {"batch_id": s["batch"]},
+    "set_import_mapping": lambda s: {
+        "batch_id": s["batch"],
+        "mapping": IMPORT_MAPPING,
+    },
+    "validate_import": lambda s: {"batch_id": s["batch"]},
+    # confirm=True on purpose: the payload that carries the created students is
+    # the one most likely to be quoted straight back into a chat, and it is the
+    # one worth searching hardest. It must come back as aliases.
+    "commit_import": lambda s: {"batch_id": s["batch"], "confirm": True},
+    # confirm=False, like the two delete_* tools above: the branch that returns
+    # a `wouldDelete` summary is itself a payload worth searching, and leaving
+    # the batch behind keeps this suite's fixtures inspectable.
+    "discard_import": lambda s: {"batch_id": s["batch"], "confirm": False},
+}
+
+# The mapping the seeded spreadsheet needs. Written out here rather than
+# derived from the preview so that a change in the header heuristic shows up as
+# a failing assertion rather than as a silently different test.
+IMPORT_MAPPING = {
+    "sheet": "Caseload",
+    "header_row": 1,
+    "data_start_row": 2,
+    "columns": {
+        "A": "full_name_last_first",
+        "B": "date_of_birth",
+        "C": "uic",
+        "D": "school",
+        "E": "teacher",
+    },
 }
 
 
@@ -421,7 +551,7 @@ def test_registry_is_not_empty():
     """A registry that failed to populate would make every other test vacuous."""
     from app.mcp.server import registered_tools
 
-    assert len(registered_tools()) >= 25
+    assert len(registered_tools()) >= 31
 
 
 def test_every_registered_tool_is_pii_filtered():
