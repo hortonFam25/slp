@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Date, DateTime, Boolean, ForeignKey, UniqueConstraint, text
+from sqlalchemy import Column, Integer, String, Date, DateTime, Boolean, ForeignKey, UniqueConstraint, func
 from sqlalchemy.orm import relationship
 from app.db.base import Base
 
@@ -13,8 +13,8 @@ class TeacherSchoolAssignment(Base):
     end_date = Column(Date, nullable=True)
     is_primary = Column(Boolean, nullable=False, server_default='0')
     notes = Column(String(500), nullable=True)
-    created_date = Column(DateTime, nullable=False, server_default=text('GETDATE()'))
-    modified_date = Column(DateTime, nullable=False, server_default=text('GETDATE()'))
+    created_date = Column(DateTime, nullable=False, server_default=func.now())
+    modified_date = Column(DateTime, nullable=False, server_default=func.now())
 
     # Constraints
     __table_args__ = (

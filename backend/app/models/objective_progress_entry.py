@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text, Date, DateTime, ForeignKey, text
+from sqlalchemy import Column, Integer, String, Text, Date, DateTime, ForeignKey, func
 from sqlalchemy.orm import relationship
 from app.db.base import Base
 
@@ -14,8 +14,8 @@ class ObjectiveProgressEntry(Base):
     progress_comments = Column(Text, nullable=True)
     therapist_initials = Column(String(10), nullable=True)
     session_type = Column(String(50), nullable=True)
-    created_date = Column(DateTime, nullable=False, server_default=text('GETDATE()'))
-    modified_date = Column(DateTime, nullable=False, server_default=text('GETDATE()'))
+    created_date = Column(DateTime, nullable=False, server_default=func.now())
+    modified_date = Column(DateTime, nullable=False, server_default=func.now())
 
     # Relationships
     objective = relationship("GoalObjective", back_populates="progress_entries")

@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, ForeignKey, text, UniqueConstraint, Numeric
+from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, ForeignKey, UniqueConstraint, Numeric, func
 from sqlalchemy.orm import relationship
 from app.db.base import Base
 
@@ -39,8 +39,8 @@ class SessionObjective(Base):
     data_collection_method = Column(String(100), nullable=True)
     
     # Metadata
-    created_date = Column(DateTime, nullable=False, server_default=text('GETDATE()'))
-    modified_date = Column(DateTime, nullable=False, server_default=text('GETDATE()'))
+    created_date = Column(DateTime, nullable=False, server_default=func.now())
+    modified_date = Column(DateTime, nullable=False, server_default=func.now())
 
     # Ensure one record per session-objective combination
     __table_args__ = (

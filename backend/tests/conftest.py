@@ -43,32 +43,11 @@ os.environ["OPENAI_API_KEY"] = os.environ.get("OPENAI_API_KEY", "")
 os.environ["PYTHONIOENCODING"] = "utf-8"
 
 
-# ---------------------------------------------------------------------------
-# sqlite DDL shim
-# ---------------------------------------------------------------------------
-# The models are written against Azure SQL: dozens of columns carry
-# `server_default=text("GETDATE()")`. sqlite has no GETDATE(), so the
-# `create_all` that main.py's startup handler runs in development mode dies with
-# `near "(": syntax error` before a single test can issue a request.
-#
-# Rewriting the models is out of scope for a smoke suite (and would change what
-# ships to Azure), so the substitution happens here, in the test harness only,
-# at the point the DDL reaches the driver. It is scoped to the sqlite dialect
-# and to statements that actually mention GETDATE(), so nothing else in the
-# application's SQL is touched. `CURRENT_TIMESTAMP` is sqlite's equivalent.
-#
-# If the models ever move to a portable default (`func.now()` /
-# `server_default=text("CURRENT_TIMESTAMP")`), delete this block — the tests
-# will keep passing without it.
-from sqlalchemy import event  # noqa: E402
-from sqlalchemy.engine import Engine  # noqa: E402
-
-
-@event.listens_for(Engine, "before_cursor_execute", retval=True)
-def _sqlite_translate_getdate(conn, cursor, statement, parameters, context, executemany):
-    if conn.dialect.name == "sqlite" and "GETDATE()" in statement:
-        statement = statement.replace("GETDATE()", "CURRENT_TIMESTAMP")
-    return statement, parameters
+# There used to be a `before_cursor_execute` shim here rewriting `GETDATE()` to
+# `CURRENT_TIMESTAMP`, because the models hard-coded the SQL-Server-only
+# `server_default=text("GETDATE()")` and sqlite's `create_all` died on the first
+# CREATE TABLE. The models now use `func.now()`, which each dialect renders for
+# itself, so the tests run against unmodified DDL.
 
 
 @pytest.fixture(scope="session")

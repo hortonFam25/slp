@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, Date, DateTime, Boolean, Text, ForeignKey, text
+from sqlalchemy import Column, Integer, Date, DateTime, Boolean, Text, ForeignKey, func
 from sqlalchemy.orm import relationship
 from app.db.base import Base
 
@@ -13,8 +13,8 @@ class StudentEligibility(Base):
     end_date = Column(Date, nullable=True)
     is_primary = Column(Boolean, nullable=False, server_default='0', index=True)
     notes = Column(Text, nullable=True)
-    created_date = Column(DateTime, nullable=False, server_default=text('GETDATE()'))
-    modified_date = Column(DateTime, nullable=False, server_default=text('GETDATE()'))
+    created_date = Column(DateTime, nullable=False, server_default=func.now())
+    modified_date = Column(DateTime, nullable=False, server_default=func.now())
 
     # Relationships
     student = relationship("Student", back_populates="eligibilities")

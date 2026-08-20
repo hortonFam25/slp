@@ -144,14 +144,14 @@ def assert_seedable(connection) -> str:
 _SQLITE_SHIM_INSTALLED = False
 
 
-def _install_sqlite_getdate_shim() -> None:
-    """Translate ``GETDATE()`` to ``CURRENT_TIMESTAMP`` for sqlite only.
+def _install_sqlite_shim() -> None:
+    """Turn foreign-key enforcement on for sqlite connections.
 
-    The models are written against Azure SQL and carry
-    ``server_default=text("GETDATE()")`` on ~60 columns. sqlite has no
-    GETDATE(), so ``create_all`` dies on the first CREATE TABLE. Same shim as
-    backend/tests/conftest.py, scoped to the sqlite dialect and to statements
-    that actually mention GETDATE(), so no other SQL is touched.
+    This used to also rewrite ``GETDATE()`` to ``CURRENT_TIMESTAMP`` in outgoing
+    DDL, because the models hard-coded the SQL-Server-only
+    ``server_default=text("GETDATE()")``. They now use ``func.now()``, which the
+    sqlite dialect renders as ``CURRENT_TIMESTAMP`` on its own, so only the
+    pragma is left.
     """
     global _SQLITE_SHIM_INSTALLED
     if _SQLITE_SHIM_INSTALLED:
@@ -159,12 +159,6 @@ def _install_sqlite_getdate_shim() -> None:
 
     from sqlalchemy import event
     from sqlalchemy.engine import Engine
-
-    @event.listens_for(Engine, "before_cursor_execute", retval=True)
-    def _translate(conn, cursor, statement, parameters, context, executemany):  # noqa: ANN001
-        if conn.dialect.name == "sqlite" and "GETDATE()" in statement:
-            statement = statement.replace("GETDATE()", "CURRENT_TIMESTAMP")
-        return statement, parameters
 
     @event.listens_for(Engine, "connect")
     def _fk_pragma(dbapi_connection, connection_record):  # noqa: ANN001
@@ -183,7 +177,7 @@ def _install_sqlite_getdate_shim() -> None:
 def build_sqlite_engine(path: str):
     from sqlalchemy import create_engine
 
-    _install_sqlite_getdate_shim()
+    _install_sqlite_shim()
     if path in (":memory:", "memory"):
         url = "sqlite://"
     else:

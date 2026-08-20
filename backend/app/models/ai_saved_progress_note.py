@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text, text
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text, func
 from sqlalchemy.orm import relationship
 
 from app.db.base import Base
@@ -17,8 +17,8 @@ class AISavedProgressNote(Base):
     template_version = Column(String(50), nullable=False, server_default="v1")
     status = Column(String(50), nullable=False, server_default="draft", index=True)
     created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
-    created_date = Column(DateTime, nullable=False, server_default=text("GETDATE()"), index=True)
-    modified_date = Column(DateTime, nullable=False, server_default=text("GETDATE()"))
+    created_date = Column(DateTime, nullable=False, server_default=func.now(), index=True)
+    modified_date = Column(DateTime, nullable=False, server_default=func.now())
 
     student = relationship("Student")
     user = relationship("User", foreign_keys=[user_id])

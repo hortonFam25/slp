@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text, text
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text, func
 from sqlalchemy.orm import relationship
 
 from app.db.base import Base
@@ -18,7 +18,7 @@ class AIChatMessage(Base):
     role = Column(String(50), nullable=False, index=True)
     model_content = Column(Text, nullable=False)
     ui_content = Column(Text, nullable=False)
-    created_date = Column(DateTime, nullable=False, server_default=text("GETDATE()"), index=True)
+    created_date = Column(DateTime, nullable=False, server_default=func.now(), index=True)
 
     session = relationship("AIChatSession", back_populates="messages")
     parent_user_message = relationship("AIChatMessage", remote_side=[id], uselist=False)

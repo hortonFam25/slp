@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Date, DateTime, Text, ForeignKey, text
+from sqlalchemy import Column, Integer, String, Date, DateTime, Text, ForeignKey, func
 from sqlalchemy.orm import relationship
 from app.db.base import Base
 
@@ -18,8 +18,8 @@ class IEPGoal(Base):
     start_date = Column(Date, nullable=False, index=True)
     end_date = Column(Date, nullable=True)
     mastery_date = Column(Date, nullable=True)
-    created_date = Column(DateTime, nullable=False, server_default=text('GETDATE()'))
-    modified_date = Column(DateTime, nullable=False, server_default=text('GETDATE()'))
+    created_date = Column(DateTime, nullable=False, server_default=func.now())
+    modified_date = Column(DateTime, nullable=False, server_default=func.now())
 
     # Relationships
     student = relationship("Student", back_populates="iep_goals")

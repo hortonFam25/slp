@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, ForeignKey, text, UniqueConstraint
+from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, ForeignKey, UniqueConstraint, func
 from sqlalchemy.orm import relationship
 from app.db.base import Base
 
@@ -29,8 +29,8 @@ class SessionGoal(Base):
     time_spent_minutes = Column(Integer, nullable=True)
     
     # Metadata
-    created_date = Column(DateTime, nullable=False, server_default=text('GETDATE()'))
-    modified_date = Column(DateTime, nullable=False, server_default=text('GETDATE()'))
+    created_date = Column(DateTime, nullable=False, server_default=func.now())
+    modified_date = Column(DateTime, nullable=False, server_default=func.now())
 
     # Ensure one record per session-goal combination
     __table_args__ = (

@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Date, DateTime, Text, ForeignKey, text
+from sqlalchemy import Column, Integer, String, Date, DateTime, Text, ForeignKey, func
 from sqlalchemy.orm import relationship
 from app.db.base import Base
 
@@ -19,8 +19,8 @@ class AssessmentData(Base):
     scaled_score = Column(Integer, nullable=True)
     results_summary = Column(Text, nullable=True)
     recommendations = Column(Text, nullable=True)
-    created_date = Column(DateTime, nullable=False, server_default=text('GETDATE()'))
-    modified_date = Column(DateTime, nullable=False, server_default=text('GETDATE()'))
+    created_date = Column(DateTime, nullable=False, server_default=func.now())
+    modified_date = Column(DateTime, nullable=False, server_default=func.now())
 
     # Relationships
     student = relationship("Student", back_populates="assessment_data")

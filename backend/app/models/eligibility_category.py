@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, text
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, func
 from sqlalchemy.orm import relationship
 from app.db.base import Base
 
@@ -12,8 +12,8 @@ class EligibilityCategory(Base):
     description = Column(String(500), nullable=True)
     is_active = Column(Boolean, nullable=False, server_default='1', index=True)
     display_order = Column(Integer, nullable=True, index=True)
-    created_date = Column(DateTime, nullable=False, server_default=text('GETDATE()'))
-    modified_date = Column(DateTime, nullable=False, server_default=text('GETDATE()'))
+    created_date = Column(DateTime, nullable=False, server_default=func.now())
+    modified_date = Column(DateTime, nullable=False, server_default=func.now())
 
     # Relationships
     student_eligibilities = relationship("StudentEligibility", back_populates="eligibility_category")

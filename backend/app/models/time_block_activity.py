@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, Text, ForeignKey, text
+from sqlalchemy import Column, Integer, String, DateTime, Text, ForeignKey, func
 from sqlalchemy.orm import relationship
 from app.db.base import Base
 
@@ -28,8 +28,8 @@ class TimeBlockActivity(Base):
     sequence_order = Column(Integer, nullable=False, index=True)
     
     # Metadata
-    created_date = Column(DateTime, nullable=False, server_default=text('GETDATE()'))
-    modified_date = Column(DateTime, nullable=False, server_default=text('GETDATE()'))
+    created_date = Column(DateTime, nullable=False, server_default=func.now())
+    modified_date = Column(DateTime, nullable=False, server_default=func.now())
     created_by = Column(String(100), nullable=True)
 
     # Relationships
