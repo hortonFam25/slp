@@ -23,8 +23,11 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from app.security import jwt_production
 from app.settings import settings
 
-TENANT = settings.aad_tenant_id or "00000000-0000-0000-0000-000000000000"
-API_URI_AUD = settings.aad_api_audience                     # "api://<guid>"
+# Pinned test identities — NOT read from settings/env, so the validator and
+# the signed tokens agree regardless of what AAD_* vars the machine has (CI
+# has none; a dev box may have real ones).
+TENANT = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+API_URI_AUD = "api://11112222-3333-4444-5555-666677778888"
 BARE_GUID_AUD = API_URI_AUD.removeprefix("api://")
 V2_ISSUER = f"https://login.microsoftonline.com/{TENANT}/v2.0"
 V1_ISSUER = f"https://sts.windows.net/{TENANT}/"
@@ -37,6 +40,8 @@ def rsa_key():
 
 @pytest.fixture()
 def validator(rsa_key, monkeypatch):
+    monkeypatch.setattr(settings, "aad_tenant_id", TENANT)
+    monkeypatch.setattr(settings, "aad_api_audience", API_URI_AUD)
     v = jwt_production.JWTValidator()
 
     class _Key:
