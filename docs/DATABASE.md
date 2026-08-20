@@ -327,6 +327,45 @@ only, as always.
 
 ---
 
+## Audit trail
+
+`therapy_session_audit_log` is the history of edits to therapy sessions and
+session objectives: one row per change, carrying `table_name` / `record_id` /
+`field_name`, the old and new values, the operation type, a timestamp, and the
+database login that made it. `change_reason` and `user_context` are only filled
+by `sp_LogTherapySessionChange`, which is called deliberately; the triggers
+leave them NULL. `field_name` is nullable because one trigger's INSERT list
+omits it — a whole-row operation names no single column.
+
+Nothing in the application writes to it. The writers are two SQL Server
+triggers,
+
+* `trg_therapy_sessions_audit_safe` on `therapy_sessions`
+* `trg_session_objectives_audit_safe` on `session_objectives`
+
+and the readers are `vw_recent_audit_changes` and `sp_GetStudentAuditHistory`.
+Triggers are also why the app's engine sets `implicit_returning=False`.
+
+**Triggers are SQL Server only.** On sqlite the table is created and stays
+empty — there is nothing to fire, and that is expected, not a broken dev
+environment.
+
+Restored 2026-08-20 by migration `b4e7a1c93d20`. A production catalog
+inventory found the system half-demolished: both triggers still present but
+`is_disabled = 1`, the table they insert into gone entirely, and the view and
+both procedures left referencing it. The likely sequence is that the table was
+dropped, the triggers then started failing, and someone disabled them to stop
+the errors — no migration recorded any of it, so nothing in the repository knew
+the table had ever existed. `b4e7a1c93d20` recreates the table with its indexes
+and re-enables each trigger, guarded on the mssql dialect and on the trigger
+being present in `sys.triggers`, so it is a clean no-op on `slpdb_dev` and on
+sqlite. There is now a model
+([`therapy_session_audit_log.py`](../backend/app/models/therapy_session_audit_log.py))
+as well, so `create_all` produces the table and it cannot silently go missing
+again.
+
+---
+
 ## The tools
 
 | File | What it is |
@@ -336,6 +375,7 @@ only, as always.
 | [`backend/scripts/grant_migration_identity.sql`](../backend/scripts/grant_migration_identity.sql) | The exact, minimal permissions the CI identity gets, with the reasoning for each. |
 | [`.github/workflows/migrate.yml`](../.github/workflows/migrate.yml) | The dispatch-only migration workflow. |
 | [`backend/tests/test_seed_dev.py`](../backend/tests/test_seed_dev.py) | The gate: the guards refuse production, the catalog-only rule holds across the whole module, and the seeder runs end to end on sqlite. |
+| [`backend/tests/test_audit_log_migration.py`](../backend/tests/test_audit_log_migration.py) | Covers `b4e7a1c93d20`: the ENABLE TRIGGER branch is driven through a stand-in bind, since no test may touch SQL Server. |
 
 ---
 
