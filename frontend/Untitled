@@ -1,0 +1,4 @@
+VITE_API_BASE_URL=https://slppro-api-a7caazgxa2gcaaaz.eastus2-01.azurewebsites.net
+VITE_AAD_CLIENT_ID=7565d8f5-cc0a-4595-b594-1d836a1fc558
+VITE_AAD_TENANT_ID=6481be4b-701d-41fe-8371-91c69d38228c
+VITE_AAD_REDIRECT_URI=https://slppro-dbgmguexhmd5h3fh.eastus2-01.azurewebsites.net

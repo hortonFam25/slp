@@ -4,6 +4,7 @@ from typing import List, Optional
 from datetime import date
 
 from app.db.database import get_db
+from app.dependencies.auth import get_auth_context
 from app.repositories.teacher_repository import TeacherRepository
 from app.schemas.teacher import (
     TeacherCreate,
@@ -14,6 +15,7 @@ from app.schemas.teacher import (
     StudentTeacherAssignmentRead,
     StudentTeacherAssignmentUpdate
 )
+from app.schemas.role import RoleRead
 from app.schemas.school import (
     SchoolTeacherAssignmentCreate,
     SchoolTeacherAssignmentRead,
@@ -21,13 +23,14 @@ from app.schemas.school import (
 )
 
 
-router = APIRouter(prefix="/api", tags=["teachers"])
+router = APIRouter(prefix="/api", tags=["teachers"], dependencies=[Depends(get_auth_context)])
 
 
 @router.get("/teachers", response_model=List[TeacherRead])
 def list_teachers(
     is_active: Optional[bool] = Query(None, description="Filter by active status"),
     school_id: Optional[int] = Query(None, description="Filter by current school assignment"),
+    role_id: Optional[int] = Query(None, description="Filter by assigned role"),
     department: Optional[str] = Query(None, description="Filter by department"),
     search: Optional[str] = Query(None, description="Search in name, email, title, or department"),
     skip: int = Query(0, ge=0, description="Number of records to skip"),
@@ -39,12 +42,23 @@ def list_teachers(
     teachers = repo.list_teachers(
         is_active=is_active,
         school_id=school_id,
+        role_id=role_id,
         department=department,
         search=search,
         skip=skip,
         limit=limit
     )
     return teachers
+
+
+@router.get("/roles", response_model=List[RoleRead])
+def list_roles(
+    active_only: bool = Query(True, description="Return only active roles"),
+    db: Session = Depends(get_db)
+):
+    """Get available support staff roles"""
+    repo = TeacherRepository(db)
+    return repo.list_roles(active_only=active_only)
 
 
 @router.get("/teachers/summary", response_model=List[TeacherSummary])

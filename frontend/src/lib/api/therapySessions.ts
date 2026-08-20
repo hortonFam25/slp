@@ -62,6 +62,17 @@ export interface TherapySessionGoalsResponse {
   }>;
 }
 
+export interface UpdateAppointmentObjectivesRequest {
+  objectives: Array<{
+    objective_id: number;
+    goal_id: number;
+    planned: boolean;
+    worked_on: boolean;
+    priority: number;
+    pre_session_notes?: string;
+  }>;
+}
+
 export interface TherapySession {
   id: number;
   student_id: number;
@@ -290,6 +301,28 @@ class TherapySessionApiService extends BaseApiService {
 
   async getTherapySessionByAppointment(appointmentId: number): Promise<TherapySessionGoalsResponse> {
     return this.get<TherapySessionGoalsResponse>(`/by-appointment/${appointmentId}`);
+  }
+
+  async updateSessionObjectivesByAppointment(
+    appointmentId: number,
+    payload: UpdateAppointmentObjectivesRequest
+  ): Promise<{ message: string }> {
+    return this.put<{ message: string }>(`/by-appointment/${appointmentId}/objectives`, payload);
+  }
+
+  async getStudentSchoolYearSessions(
+    studentId: number,
+    startDate: string,
+    endDate: string,
+    limit = 75,
+    anchorDate?: string
+  ): Promise<TherapySession[]> {
+    return this.get<TherapySession[]>(`/student/${studentId}/school-year`, {
+      start_date: startDate,
+      end_date: endDate,
+      anchor_date: anchorDate,
+      limit,
+    });
   }
 
   async getSessionsNeedingFollowup(): Promise<TherapySessionSummary[]> {

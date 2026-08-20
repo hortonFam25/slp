@@ -3,6 +3,13 @@ from datetime import date, datetime
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from app.db.database import get_db
+from app.dependencies.access_control import (
+    ensure_appointment_access,
+    ensure_goal_access,
+    ensure_objective_access,
+    ensure_therapy_session_access,
+)
+from app.dependencies.auth import AuthContext, ensure_student_access, get_auth_context
 from app.repositories.therapy_session_repository import TherapySessionRepository
 from app.schemas.therapy_session import (
     TherapySessionCreate, TherapySessionUpdate, TherapySessionResponse, 
@@ -11,23 +18,43 @@ from app.schemas.therapy_session import (
     SessionGoalResponse, SessionObjectiveResponse, SessionObjectiveUpdate
 )
 
-router = APIRouter(prefix="/api/therapy-sessions", tags=["therapy-sessions"])
+router = APIRouter(prefix="/api/therapy-sessions", tags=["therapy-sessions"], dependencies=[Depends(get_auth_context)])
 
 
 def get_therapy_session_repo(db: Session = Depends(get_db)) -> TherapySessionRepository:
     return TherapySessionRepository(db)
 
 
+def _should_mask_student_names(auth: AuthContext) -> bool:
+    return auth.is_admin or auth.user.id != auth.effective_user.id
+
+
+def _student_alias_from_session(session) -> str | None:
+    if not session or not session.student:
+        return None
+    return session.student.student_alias or f"student_{session.student.id}"
+
+
+def _student_name_for_session(session, auth: AuthContext) -> str | None:
+    if not session or not session.student:
+        return None
+    if _should_mask_student_names(auth):
+        return _student_alias_from_session(session)
+    return session.student.full_name
+
+
 @router.post("/", response_model=TherapySessionResponse)
 @router.post("", response_model=TherapySessionResponse)  # Handle both with and without trailing slash
 async def create_therapy_session(
     session_data: TherapySessionCreate,
-    repo: TherapySessionRepository = Depends(get_therapy_session_repo)
+    repo: TherapySessionRepository = Depends(get_therapy_session_repo),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """Create a new therapy session with optional goals and objectives"""
     try:
+        ensure_student_access(auth, session_data.student_id, action="create therapy session")
         session = repo.create_session(session_data)
-        return _build_session_response(session)
+        return _build_session_response(session, auth)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to create therapy session: {str(e)}")
 
@@ -35,12 +62,14 @@ async def create_therapy_session(
 @router.post("/start", response_model=TherapySessionResponse)
 async def start_therapy_session(
     request: StartSessionRequest,
-    repo: TherapySessionRepository = Depends(get_therapy_session_repo)
+    repo: TherapySessionRepository = Depends(get_therapy_session_repo),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """Start a new therapy session (scheduled, unscheduled, or ad-hoc)"""
     try:
+        ensure_student_access(auth, request.student_id, action="start therapy session")
         session = repo.start_session(request)
-        return _build_session_response(session)
+        return _build_session_response(session, auth)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to start therapy session: {str(e)}")
 
@@ -48,10 +77,12 @@ async def start_therapy_session(
 @router.get("/by-appointment/{appointment_id}")
 async def get_therapy_session_by_appointment(
     appointment_id: int,
-    repo: TherapySessionRepository = Depends(get_therapy_session_repo)
+    repo: TherapySessionRepository = Depends(get_therapy_session_repo),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """Get therapy session with goals and objectives by appointment ID"""
     try:
+        ensure_appointment_access(repo.db, auth, appointment_id)
         session = repo.get_session_by_appointment_id(appointment_id)
         if not session:
             # Return empty data instead of 404 - appointment exists but no session data yet
@@ -93,10 +124,12 @@ async def get_therapy_session_by_appointment(
 async def update_therapy_session_objectives_by_appointment(
     appointment_id: int,
     request: dict,
-    repo: TherapySessionRepository = Depends(get_therapy_session_repo)
+    repo: TherapySessionRepository = Depends(get_therapy_session_repo),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """Update therapy session objectives with pre-session notes for an existing appointment session"""
     try:
+        ensure_appointment_access(repo.db, auth, appointment_id)
         # Get the therapy session for this appointment
         session = repo.get_session_by_appointment_id(appointment_id)
         
@@ -184,8 +217,11 @@ async def get_therapy_sessions(
     skip: int = Query(0, ge=0, description="Number of records to skip"),
     limit: int = Query(100, ge=1, le=1000, description="Number of records to return"),
     order_by: Optional[str] = Query("desc", description="Order direction: 'asc' for oldest first, 'desc' for newest first"),
-    repo: TherapySessionRepository = Depends(get_therapy_session_repo)
+    repo: TherapySessionRepository = Depends(get_therapy_session_repo),
+    auth: AuthContext = Depends(get_auth_context),
 ):
+    if student_id is not None:
+        ensure_student_access(auth, student_id, action="list therapy sessions")
     """Get therapy sessions with optional filtering"""
     filters = TherapySessionFilters(
         student_id=student_id,
@@ -196,49 +232,57 @@ async def get_therapy_sessions(
     )
     
     sessions = repo.get_sessions(filters, skip=skip, limit=limit, order_by=order_by)
-    return [_build_session_summary(session) for session in sessions]
+    if auth.enforce_access and not auth.is_admin:
+        sessions = [s for s in sessions if s.student_id in auth.allowed_student_ids]
+    return [_build_session_summary(session, auth) for session in sessions]
 
 
 @router.get("/{session_id}", response_model=TherapySessionResponse)
 async def get_therapy_session(
     session_id: int,
     include_details: bool = Query(True, description="Include goals and objectives"),
-    repo: TherapySessionRepository = Depends(get_therapy_session_repo)
+    repo: TherapySessionRepository = Depends(get_therapy_session_repo),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """Get a specific therapy session by ID"""
     session = repo.get_session_by_id(session_id, include_details=include_details)
     if not session:
         raise HTTPException(status_code=404, detail="Therapy session not found")
+    ensure_therapy_session_access(repo.db, auth, session_id)
     
-    return _build_session_response(session)
+    return _build_session_response(session, auth)
 
 
 @router.put("/{session_id}", response_model=TherapySessionResponse)
 async def update_therapy_session(
     session_id: int,
     session_data: TherapySessionUpdate,
-    repo: TherapySessionRepository = Depends(get_therapy_session_repo)
+    repo: TherapySessionRepository = Depends(get_therapy_session_repo),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """Update an existing therapy session"""
+    ensure_therapy_session_access(repo.db, auth, session_id)
     session = repo.update_session(session_id, session_data)
     if not session:
         raise HTTPException(status_code=404, detail="Therapy session not found")
     
-    return _build_session_response(session)
+    return _build_session_response(session, auth)
 
 
 @router.post("/{session_id}/complete", response_model=TherapySessionResponse)
 async def complete_therapy_session(
     session_id: int,
     request: CompleteSessionRequest,
-    repo: TherapySessionRepository = Depends(get_therapy_session_repo)
+    repo: TherapySessionRepository = Depends(get_therapy_session_repo),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """Complete a therapy session"""
+    ensure_therapy_session_access(repo.db, auth, session_id)
     session = repo.complete_session(session_id, request)
     if not session:
         raise HTTPException(status_code=404, detail="Therapy session not found")
     
-    return _build_session_response(session)
+    return _build_session_response(session, auth)
 
 
 @router.put("/{session_id}/objectives/{objective_id}", response_model=SessionObjectiveResponse)
@@ -246,9 +290,11 @@ async def update_session_objective(
     session_id: int,
     objective_id: int,
     objective_data: SessionObjectiveUpdate,
-    repo: TherapySessionRepository = Depends(get_therapy_session_repo)
+    repo: TherapySessionRepository = Depends(get_therapy_session_repo),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """Update a session objective's progress data"""
+    ensure_therapy_session_access(repo.db, auth, session_id)
     session_objective = repo.update_session_objective(session_id, objective_id, objective_data)
     if not session_objective:
         raise HTTPException(status_code=404, detail="Session objective not found")
@@ -258,26 +304,32 @@ async def update_session_objective(
 @router.get("/objectives/{objective_id}/history", response_model=List[SessionObjectiveResponse])
 async def get_objective_history(
     objective_id: int,
-    repo: TherapySessionRepository = Depends(get_therapy_session_repo)
+    repo: TherapySessionRepository = Depends(get_therapy_session_repo),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """Get historical session data for a specific objective"""
+    ensure_objective_access(repo.db, auth, objective_id)
     return repo.get_objective_history(objective_id)
 
 @router.get("/goals/{goal_id}/history")
 async def get_goal_history(
     goal_id: int,
-    repo: TherapySessionRepository = Depends(get_therapy_session_repo)
+    repo: TherapySessionRepository = Depends(get_therapy_session_repo),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """Get historical session data for all objectives under a goal"""
+    ensure_goal_access(repo.db, auth, goal_id)
     return repo.get_goal_history(goal_id)
 
 
 @router.delete("/{session_id}")
 async def delete_therapy_session(
     session_id: int,
-    repo: TherapySessionRepository = Depends(get_therapy_session_repo)
+    repo: TherapySessionRepository = Depends(get_therapy_session_repo),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """Delete a therapy session"""
+    ensure_therapy_session_access(repo.db, auth, session_id)
     success = repo.delete_session(session_id)
     if not success:
         raise HTTPException(status_code=404, detail="Therapy session not found")
@@ -289,11 +341,13 @@ async def delete_therapy_session(
 async def get_student_therapy_sessions(
     student_id: int,
     limit: int = Query(50, ge=1, le=200, description="Number of recent sessions to return"),
-    repo: TherapySessionRepository = Depends(get_therapy_session_repo)
+    repo: TherapySessionRepository = Depends(get_therapy_session_repo),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """Get recent therapy sessions for a specific student"""
+    ensure_student_access(auth, student_id, action="student therapy sessions")
     sessions = repo.get_student_sessions(student_id, limit=limit)
-    return [_build_session_summary(session) for session in sessions]
+    return [_build_session_summary(session, auth) for session in sessions]
 
 
 @router.get("/student/{student_id}/school-year", response_model=List[TherapySessionResponse])
@@ -301,38 +355,47 @@ async def get_student_school_year_sessions(
     student_id: int,
     start_date: date = Query(..., description="School year start date (typically August 1)"),
     end_date: date = Query(..., description="School year end date (typically June 30)"),
-    limit: int = Query(12, ge=1, le=50, description="Maximum number of sessions to return"),
-    repo: TherapySessionRepository = Depends(get_therapy_session_repo)
+    anchor_date: Optional[date] = Query(None, description="Date to center the returned session window around"),
+    limit: int = Query(75, ge=1, le=75, description="Maximum number of sessions to return"),
+    repo: TherapySessionRepository = Depends(get_therapy_session_repo),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """Get therapy sessions for a student within a school year date range"""
-    filters = TherapySessionFilters(
+    ensure_student_access(auth, student_id, action="student school year sessions")
+    sessions = repo.get_school_year_sessions_relative(
         student_id=student_id,
         start_date=start_date,
         end_date=end_date,
+        anchor_date=anchor_date or date.today(),
+        limit=limit,
         include_objectives=True,
-        include_goals=True
+        include_goals=True,
     )
-    
-    sessions = repo.get_sessions(filters, skip=0, limit=limit, order_by="asc")
-    return [_build_session_response(session) for session in sessions]
+    return [_build_session_response(session, auth) for session in sessions]
 
 
 @router.get("/active/all", response_model=List[TherapySessionSummary])
 async def get_active_therapy_sessions(
-    repo: TherapySessionRepository = Depends(get_therapy_session_repo)
+    repo: TherapySessionRepository = Depends(get_therapy_session_repo),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """Get all currently active (in-progress) therapy sessions"""
     sessions = repo.get_active_sessions()
-    return [_build_session_summary(session) for session in sessions]
+    if auth.enforce_access and not auth.is_admin:
+        sessions = [s for s in sessions if s.student_id in auth.allowed_student_ids]
+    return [_build_session_summary(session, auth) for session in sessions]
 
 
 @router.get("/followup/needed", response_model=List[TherapySessionSummary])
 async def get_sessions_needing_followup(
-    repo: TherapySessionRepository = Depends(get_therapy_session_repo)
+    repo: TherapySessionRepository = Depends(get_therapy_session_repo),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """Get completed sessions that need follow-up"""
     sessions = repo.get_sessions_needing_followup()
-    return [_build_session_summary(session) for session in sessions]
+    if auth.enforce_access and not auth.is_admin:
+        sessions = [s for s in sessions if s.student_id in auth.allowed_student_ids]
+    return [_build_session_summary(session, auth) for session in sessions]
 
 
 @router.get("/statistics/summary")
@@ -340,8 +403,11 @@ async def get_therapy_session_statistics(
     student_id: Optional[int] = Query(None, description="Filter by student ID"),
     start_date: Optional[date] = Query(None, description="Filter from date"),
     end_date: Optional[date] = Query(None, description="Filter to date"),
-    repo: TherapySessionRepository = Depends(get_therapy_session_repo)
+    repo: TherapySessionRepository = Depends(get_therapy_session_repo),
+    auth: AuthContext = Depends(get_auth_context),
 ):
+    if student_id is not None:
+        ensure_student_access(auth, student_id, action="therapy statistics")
     """Get statistical summary of therapy sessions"""
     return repo.get_session_statistics(
         student_id=student_id,
@@ -351,7 +417,7 @@ async def get_therapy_session_statistics(
 
 
 # Helper functions to build response objects
-def _build_session_response(session) -> TherapySessionResponse:
+def _build_session_response(session, auth: AuthContext) -> TherapySessionResponse:
     """Build a complete therapy session response"""
     response_data = {
         "id": session.id,
@@ -396,7 +462,7 @@ def _build_session_response(session) -> TherapySessionResponse:
         "progress_entries_count": session.progress_entries_count,
         
         # Student name
-        "student_name": session.student.full_name if session.student else None,
+        "student_name": _student_name_for_session(session, auth),
     }
     
     # Include session goals if loaded
@@ -459,12 +525,12 @@ def _build_session_response(session) -> TherapySessionResponse:
     return TherapySessionResponse(**response_data)
 
 
-def _build_session_summary(session) -> TherapySessionSummary:
+def _build_session_summary(session, auth: AuthContext) -> TherapySessionSummary:
     """Build a lightweight therapy session summary"""
     return TherapySessionSummary(
         id=session.id,
         student_id=session.student_id,
-        student_name=session.student.full_name if session.student else None,
+        student_name=_student_name_for_session(session, auth),
         session_date=session.session_date,
         start_time=session.start_time,
         end_time=session.end_time,

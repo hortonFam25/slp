@@ -1,0 +1,140 @@
+name: CI
+
+# Every pull request, on every branch.
+#
+# The workflow's NAME ("CI") is load-bearing: automerge.yml triggers on
+# `workflow_run` of a workflow called exactly that, and keys on this run's
+# overall conclusion. Renaming this workflow silently disables auto-merge.
+on:
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: backend
+    runs-on: ubuntu-latest
+    env:
+      # main.py is imported as a top-level module (gunicorn starts it as
+      # `main:app`), and it imports the application as `app.*`. `backend/` is
+      # therefore the import root regardless of where pytest was invoked from —
+      # backend/tests/conftest.py puts it on sys.path itself, and this makes the
+      # same true for the compileall step.
+      PYTHONPATH: ${{ github.workspace }}/backend
+      # Never let the runner's locale decide whether a traceback survives.
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # The App Service is PYTHON|3.11. pyproject still allows >=3.9,<3.13,
+          # but 3.11 is what actually runs in production, so it is what gets
+          # tested.
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-dev.txt
+
+      # pyodbc ships no manylinux wheel, so pip builds it from source and needs
+      # the unixODBC headers. Present on some runner images and absent on
+      # others — installing it explicitly costs a few seconds and removes the
+      # dependency on which image generation we happened to land on.
+      - name: ODBC headers (pyodbc builds from source on Linux)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq unixodbc-dev
+
+      - name: Install backend dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt -r backend/requirements-dev.txt
+
+      # Config lives in backend/pyproject.toml [tool.ruff]. The rule set there
+      # is deliberately a floor — syntax errors and undefined names — not a
+      # style guide. See the comments in that file before tightening it.
+      - name: ruff check
+        run: ruff check backend
+
+      # Catches a syntax error in a module no test happens to import. Cheap,
+      # and it is exactly the failure mode that turns a deploy into a 502.
+      - name: Byte-compile everything that ships
+        run: python -m compileall -q backend/app backend/main.py
+
+      # The smoke suite: the app imports, every router mounts, the OpenAPI
+      # schema builds, and one write round-trips through SQLAlchemy against a
+      # throwaway sqlite file. See backend/tests/test_smoke.py.
+      - name: pytest
+        run: pytest backend/tests -q
+
+  frontend:
+    name: frontend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - run: npm ci
+
+      # NOTE: there is deliberately no `tsc --noEmit` step here.
+      #
+      # The existing app does not typecheck — 76 errors across 23 files as of
+      # this workflow being written, most of them TanStack Query v4 -> v5 fallout
+      # (`onError` was removed from useQuery) plus a handful of drifted API
+      # types. `npm run build` is plain `vite build`, which transpiles with
+      # esbuild and never typechecks, so none of that has ever blocked a ship.
+      #
+      # Adding the step today would mean either a red gate on day one or a
+      # large, unreviewed type sweep bundled into the CI change. The build below
+      # is the gate instead. Once those 76 are cleaned up, add:
+      #
+      #   - name: tsc --noEmit
+      #     run: npx tsc --noEmit
+      #
+      # and ideally flip package.json's build script to `tsc && vite build`.
+
+      # A CI checkout has no .env.local, so this is the first build of the day
+      # guaranteed not to be poisoned by local dev values.
+      - name: vite build
+        run: npm run build
+
+      # The build "succeeding" is not the same as the build producing something
+      # shippable — deploy.yml runs this same gate before it zips anything, and
+      # running it here means a broken bundle is caught on the PR instead of on
+      # main. See the 2026-08-14 white-screen incident in the football repo:
+      # a 55-byte stub index.html shipped and the app came up blank.
+      - name: Gate — dist/ is a real build, not a stub
+        run: |
+          python3 - <<'PY'
+          import os, re, sys
+
+          root = "dist"
+          idx_path = os.path.join(root, "index.html")
+          if not os.path.exists(idx_path):
+              sys.exit(f"FAIL: {idx_path} missing — vite produced no shell.")
+          idx = open(idx_path, encoding="utf-8").read()
+          m = re.search(r"assets/(index-[\w-]+\.js)", idx)
+          if not m or len(idx) <= 500:
+              sys.exit(f"FAIL: {idx_path} looks like a stub "
+                       f"(len={len(idx)}, bundle_ref={bool(m)}).")
+          bundle = os.path.join(root, "assets", m.group(1))
+          if not os.path.exists(bundle):
+              sys.exit(f"FAIL: index.html references {m.group(1)}, which is not there.")
+          size = os.path.getsize(bundle)
+          if size <= 100_000:
+              sys.exit(f"FAIL: {m.group(1)} is {size} bytes — that is not a real bundle.")
+          print(f"OK: index.html is {len(idx)} bytes and points at "
+                f"{m.group(1)} ({size // 1024} KB).")
+          PY

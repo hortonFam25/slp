@@ -210,7 +210,7 @@ export function TeacherCard({ teacher, onEdit, onDelete }: TeacherCardProps) {
                 bgcolor: 'rgba(64,168,182,0.1)'
               }
             }}
-            title="Edit Teacher"
+            title="Edit Support Staff"
           >
             <Edit />
           </IconButton>
@@ -223,7 +223,7 @@ export function TeacherCard({ teacher, onEdit, onDelete }: TeacherCardProps) {
                 bgcolor: 'rgba(244,67,54,0.1)'
               }
             }}
-            title="Deactivate Teacher"
+            title="Deactivate Support Staff"
           >
             <Delete />
           </IconButton>

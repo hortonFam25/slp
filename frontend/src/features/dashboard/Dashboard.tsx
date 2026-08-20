@@ -14,27 +14,31 @@ export default function Dashboard() {
   return (
     <Box sx={{ 
       flex: 1, 
-      height: '100vh',
+      height: '100%',
       display: 'flex',
       flexDirection: 'column',
       overflow: 'hidden'
     }}>
       {/* Page Header */}
       <Box sx={{ 
-        p: 3, 
-        pb: 2,
+        px: { xs: 1.5, sm: 2 },
+        pt: { xs: 1.5, sm: 2 },
+        pb: { xs: 1, sm: 1.25 },
         backgroundColor: 'background.default',
-        borderBottom: '1px solid',
-        borderColor: 'divider'
+        position: 'sticky',
+        top: 0,
+        zIndex: 2,
       }}>
-        <Typography variant="h4" sx={{ 
+        <Typography sx={{ 
           fontWeight: 700, 
           color: '#41AAB7',
           display: 'flex',
           alignItems: 'center',
-          gap: 2
+          gap: 1.25,
+          fontSize: { xs: '1.35rem', sm: '1.5rem' },
+          lineHeight: 1.2
         }}>
-          <LayoutDashboard size={32} />
+          <LayoutDashboard size={24} />
           Dashboard
         </Typography>
       </Box>
@@ -43,7 +47,7 @@ export default function Dashboard() {
       <Box sx={{ flex: 1, overflow: 'hidden' }}>
         {isMobile ? (
           // Mobile Layout - Full width calendar with drawer overlay
-          <Box sx={{ height: '100%', p: 3, pt: 2 }}>
+          <Box sx={{ height: '100%', p: { xs: 1.5, sm: 2 }, pt: { xs: 1, sm: 1.25 } }}>
             <DailyScheduleView onAppointmentSelect={setSelectedAppointment} />
             
             {/* Mobile Drawer Overlay */}
@@ -123,7 +127,7 @@ export default function Dashboard() {
           </Box>
         ) : (
           // Desktop Layout - Side by side
-          <Grid container spacing={3} sx={{ height: '100%', p: 3, pt: 2 }}>
+          <Grid container spacing={2} sx={{ height: '100%', p: { xs: 1.5, sm: 2 }, pt: { xs: 1, sm: 1.25 } }}>
             {/* Daily Calendar */}
             <Grid item xs={12} lg={6} sx={{ height: '100%' }}>
               <DailyScheduleView onAppointmentSelect={setSelectedAppointment} />

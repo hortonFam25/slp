@@ -86,6 +86,7 @@ class TeacherSummary(BaseModel):
 class StudentRead(BaseModel):
     """Student read model with new relationship structure"""
     id: int
+    student_alias: str
     first: str
     last: str
     uic: Optional[str] = None
@@ -122,6 +123,7 @@ class StudentRead(BaseModel):
 class StudentSummary(BaseModel):
     """Lightweight student model for lists and summaries"""
     id: int
+    student_alias: str
     first: str
     last: str
     grade_level: Optional[str] = None

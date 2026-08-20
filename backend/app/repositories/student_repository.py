@@ -9,12 +9,26 @@ class StudentRepository:
     def __init__(self, session: Session):
         self.session = session
 
-    def list_students(self, enrollment_status: Optional[str] = None, include_archived: bool = False) -> List[Student]:
+    @staticmethod
+    def _apply_access_filter(query, allowed_student_ids: Optional[list[int]] = None):
+        if allowed_student_ids is None:
+            return query
+        if not allowed_student_ids:
+            return query.filter(Student.id == -1)
+        return query.filter(Student.id.in_(allowed_student_ids))
+
+    def list_students(
+        self,
+        enrollment_status: Optional[str] = None,
+        include_archived: bool = False,
+        allowed_student_ids: Optional[list[int]] = None,
+    ) -> List[Student]:
         query = self.session.query(Student).options(
             joinedload(Student.school),
             joinedload(Student.teacher),
             joinedload(Student.case_manager)
         )
+        query = self._apply_access_filter(query, allowed_student_ids)
         
         # Filter out archived students by default
         if not include_archived:
@@ -25,7 +39,7 @@ class StudentRepository:
             
         return query.order_by(Student.last.asc()).all()
 
-    def get_student_by_id(self, student_id: int) -> Optional[Student]:
+    def get_student_by_id(self, student_id: int, allowed_student_ids: Optional[list[int]] = None) -> Optional[Student]:
         student = self.session.query(Student)\
             .options(
                 joinedload(Student.eligibilities).joinedload(StudentEligibility.eligibility_category),
@@ -33,15 +47,22 @@ class StudentRepository:
                 joinedload(Student.teacher),
                 joinedload(Student.case_manager)
             )\
-            .filter(Student.id == student_id).first()
+            .filter(Student.id == student_id)
+        student = self._apply_access_filter(student, allowed_student_ids).first()
         
         return student
 
     def get_student_by_uic(self, uic: str) -> Optional[Student]:
         return self.session.query(Student).filter(Student.uic == uic).first()
 
-    def get_students_by_case_manager(self, case_manager_id: int, include_archived: bool = False) -> List[Student]:
+    def get_students_by_case_manager(
+        self,
+        case_manager_id: int,
+        include_archived: bool = False,
+        allowed_student_ids: Optional[list[int]] = None,
+    ) -> List[Student]:
         query = self.session.query(Student).filter(Student.case_manager_id == case_manager_id)
+        query = self._apply_access_filter(query, allowed_student_ids)
         
         # Filter out archived students by default
         if not include_archived:
@@ -51,6 +72,7 @@ class StudentRepository:
 
     def create_student(self, payload: StudentCreate) -> Student:
         student = Student(
+            student_alias="",
             first=payload.first,
             last=payload.last,
             uic=payload.uic,
@@ -70,6 +92,8 @@ class StudentRepository:
             eligibility_determination_date=payload.eligibility_determination_date
         )
         self.session.add(student)
+        self.session.flush()
+        student.student_alias = f"student_{student.id}"
         self.session.commit()
         self.session.refresh(student)
         
@@ -83,8 +107,13 @@ class StudentRepository:
         
         return student
 
-    def update_student(self, student_id: int, payload: StudentUpdate) -> Optional[Student]:
-        student = self.get_student_by_id(student_id)
+    def update_student(
+        self,
+        student_id: int,
+        payload: StudentUpdate,
+        allowed_student_ids: Optional[list[int]] = None,
+    ) -> Optional[Student]:
+        student = self.get_student_by_id(student_id, allowed_student_ids=allowed_student_ids)
         if not student:
             return None
         
@@ -105,8 +134,8 @@ class StudentRepository:
         self.session.refresh(student)
         return student
 
-    def delete_student(self, student_id: int) -> bool:
-        student = self.get_student_by_id(student_id)
+    def delete_student(self, student_id: int, allowed_student_ids: Optional[list[int]] = None) -> bool:
+        student = self.get_student_by_id(student_id, allowed_student_ids=allowed_student_ids)
         if not student:
             return False
         
@@ -114,9 +143,9 @@ class StudentRepository:
         self.session.commit()
         return True
 
-    def archive_student(self, student_id: int) -> Optional[Student]:
+    def archive_student(self, student_id: int, allowed_student_ids: Optional[list[int]] = None) -> Optional[Student]:
         """Archive a student (hide from active lists but preserve data)"""
-        student = self.get_student_by_id(student_id)
+        student = self.get_student_by_id(student_id, allowed_student_ids=allowed_student_ids)
         if not student:
             return None
         
@@ -125,9 +154,9 @@ class StudentRepository:
         self.session.refresh(student)
         return student
 
-    def unarchive_student(self, student_id: int) -> Optional[Student]:
+    def unarchive_student(self, student_id: int, allowed_student_ids: Optional[list[int]] = None) -> Optional[Student]:
         """Unarchive a student (restore to active lists)"""
-        student = self.get_student_by_id(student_id)
+        student = self.get_student_by_id(student_id, allowed_student_ids=allowed_student_ids)
         if not student:
             return None
         
@@ -136,10 +165,12 @@ class StudentRepository:
         self.session.refresh(student)
         return student
 
-    def get_archived_students(self) -> List[Student]:
+    def get_archived_students(self, allowed_student_ids: Optional[list[int]] = None) -> List[Student]:
         """Get all archived students"""
-        return self.session.query(Student).filter(
+        query = self.session.query(Student).filter(
             Student.is_archived == True
-        ).order_by(Student.last.asc()).all()
+        )
+        query = self._apply_access_filter(query, allowed_student_ids)
+        return query.order_by(Student.last.asc()).all()
 
 

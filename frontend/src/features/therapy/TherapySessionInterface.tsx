@@ -294,7 +294,10 @@ export function TherapySessionInterface({
       {/* Content Area */}
       <Box sx={{ 
         flex: 1, 
-        overflow: 'auto', 
+        minHeight: 0,
+        display: 'flex',
+        flexDirection: 'column',
+        overflow: currentView === 'goals' ? 'hidden' : 'auto',
         p: isMobile ? 2 : 3 
       }}>
         {!isSessionActive && !isSessionCompleted && (

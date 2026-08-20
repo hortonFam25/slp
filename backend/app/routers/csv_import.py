@@ -5,11 +5,12 @@ from typing import Optional
 from io import StringIO
 
 from app.db.database import get_db
+from app.dependencies.auth import get_auth_context
 from app.services.csv_import_service import CSVImportService
 from app.schemas.csv_import import CSVImportRequest, CSVImportResult, generate_csv_template, generate_caseload_template
 
 
-router = APIRouter(prefix="/api/csv", tags=["csv-import"])
+router = APIRouter(prefix="/api/csv", tags=["csv-import"], dependencies=[Depends(get_auth_context)])
 
 
 @router.get("/template")

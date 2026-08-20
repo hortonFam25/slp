@@ -4,13 +4,15 @@ from typing import List, Optional
 from datetime import date
 
 from app.db.database import get_db
+from app.dependencies.access_control import ensure_goal_access
+from app.dependencies.auth import AuthContext, ensure_student_access, get_auth_context
 from app.repositories.goal_repository import GoalRepository
 from app.repositories.goal_category_repository import GoalCategoryRepository
 from app.schemas.iep_goal import IEPGoalCreate, IEPGoalRead, IEPGoalUpdate, IEPGoalWithObjectives, IEPGoalSummary
 from app.schemas.goal_category import GoalCategoryRead, GoalCategoryCreate, GoalCategoryUpdate
 
 
-router = APIRouter(prefix="/api", tags=["goals"])
+router = APIRouter(prefix="/api", tags=["goals"], dependencies=[Depends(get_auth_context)])
 
 
 # Goal Categories Endpoints
@@ -80,49 +82,75 @@ def get_goals(
     goal_category_id: Optional[int] = Query(None, description="Filter by goal category"),
     start_date_from: Optional[date] = Query(None, description="Filter goals starting from this date"),
     start_date_to: Optional[date] = Query(None, description="Filter goals starting before this date"),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """Get goals with optional filters"""
     repo = GoalRepository(db)
-    return repo.get_goals(
+    if student_id is not None:
+        ensure_student_access(auth, student_id, action="list goals by student")
+    goals = repo.get_goals(
         student_id=student_id,
         goal_status=goal_status,
         goal_category_id=goal_category_id,
         start_date_from=start_date_from,
         start_date_to=start_date_to
     )
+    if auth.enforce_access and not auth.is_admin:
+        return [g for g in goals if g.student_id in auth.allowed_student_ids]
+    return goals
 
 
 @router.get("/goals/{goal_id}", response_model=IEPGoalRead)
-def get_goal(goal_id: int, db: Session = Depends(get_db)):
+def get_goal(
+    goal_id: int,
+    db: Session = Depends(get_db),
+    auth: AuthContext = Depends(get_auth_context),
+):
     """Get a specific goal by ID"""
     repo = GoalRepository(db)
     goal = repo.get_goal_by_id(goal_id)
     if not goal:
         raise HTTPException(status_code=404, detail="Goal not found")
+    ensure_goal_access(db, auth, goal_id)
     return goal
 
 
 @router.get("/goals/{goal_id}/with-objectives", response_model=IEPGoalWithObjectives)
-def get_goal_with_objectives(goal_id: int, db: Session = Depends(get_db)):
+def get_goal_with_objectives(
+    goal_id: int,
+    db: Session = Depends(get_db),
+    auth: AuthContext = Depends(get_auth_context),
+):
     """Get a goal with all its objectives and progress entries"""
     repo = GoalRepository(db)
     goal = repo.get_goal_by_id(goal_id)
     if not goal:
         raise HTTPException(status_code=404, detail="Goal not found")
+    ensure_goal_access(db, auth, goal_id)
     return goal
 
 
 @router.get("/students/{student_id}/goals", response_model=List[IEPGoalWithObjectives])
-def get_student_goals(student_id: int, db: Session = Depends(get_db)):
+def get_student_goals(
+    student_id: int,
+    db: Session = Depends(get_db),
+    auth: AuthContext = Depends(get_auth_context),
+):
     """Get all goals for a specific student"""
+    ensure_student_access(auth, student_id, action="list student goals")
     repo = GoalRepository(db)
     return repo.get_student_goals(student_id)
 
 
 @router.get("/students/{student_id}/goals/active", response_model=List[IEPGoalWithObjectives])
-def get_student_active_goals_for_session_planning(student_id: int, db: Session = Depends(get_db)):
+def get_student_active_goals_for_session_planning(
+    student_id: int,
+    db: Session = Depends(get_db),
+    auth: AuthContext = Depends(get_auth_context),
+):
     """Get active goals and their objectives for session planning"""
+    ensure_student_access(auth, student_id, action="list active student goals")
     repo = GoalRepository(db)
     # Get only active goals for therapy session planning
     active_goals = repo.get_goals(student_id=student_id, goal_status='Active')
@@ -138,8 +166,13 @@ def get_student_active_goals_for_session_planning(student_id: int, db: Session =
 
 
 @router.get("/students/{student_id}/goals/summary", response_model=List[IEPGoalSummary])
-def get_student_goals_summary(student_id: int, db: Session = Depends(get_db)):
+def get_student_goals_summary(
+    student_id: int,
+    db: Session = Depends(get_db),
+    auth: AuthContext = Depends(get_auth_context),
+):
     """Get a summary of goals for a specific student"""
+    ensure_student_access(auth, student_id, action="list student goal summary")
     repo = GoalRepository(db)
     goals = repo.get_student_goals(student_id)
     
@@ -163,8 +196,13 @@ def get_student_goals_summary(student_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/goals", response_model=IEPGoalRead)
-def create_goal(goal: IEPGoalCreate, db: Session = Depends(get_db)):
+def create_goal(
+    goal: IEPGoalCreate,
+    db: Session = Depends(get_db),
+    auth: AuthContext = Depends(get_auth_context),
+):
     """Create a new IEP goal"""
+    ensure_student_access(auth, goal.student_id, action="create goal")
     repo = GoalRepository(db)
     try:
         return repo.create_goal(goal)
@@ -173,8 +211,14 @@ def create_goal(goal: IEPGoalCreate, db: Session = Depends(get_db)):
 
 
 @router.put("/goals/{goal_id}", response_model=IEPGoalRead)
-def update_goal(goal_id: int, goal_data: IEPGoalUpdate, db: Session = Depends(get_db)):
+def update_goal(
+    goal_id: int,
+    goal_data: IEPGoalUpdate,
+    db: Session = Depends(get_db),
+    auth: AuthContext = Depends(get_auth_context),
+):
     """Update an existing goal"""
+    ensure_goal_access(db, auth, goal_id)
     repo = GoalRepository(db)
     goal = repo.update_goal(goal_id, goal_data)
     if not goal:
@@ -183,8 +227,13 @@ def update_goal(goal_id: int, goal_data: IEPGoalUpdate, db: Session = Depends(ge
 
 
 @router.delete("/goals/{goal_id}")
-def delete_goal(goal_id: int, db: Session = Depends(get_db)):
+def delete_goal(
+    goal_id: int,
+    db: Session = Depends(get_db),
+    auth: AuthContext = Depends(get_auth_context),
+):
     """Delete a goal and all related objectives/progress entries"""
+    ensure_goal_access(db, auth, goal_id)
     repo = GoalRepository(db)
     success = repo.delete_goal(goal_id)
     if not success:
@@ -217,18 +266,31 @@ def duplicate_goal(
 
 # Goals by status
 @router.get("/goals/status/{status}", response_model=List[IEPGoalRead])
-def get_goals_by_status(status: str, db: Session = Depends(get_db)):
+def get_goals_by_status(
+    status: str,
+    db: Session = Depends(get_db),
+    auth: AuthContext = Depends(get_auth_context),
+):
     """Get all goals with a specific status"""
     repo = GoalRepository(db)
-    return repo.get_goals_by_status(status)
+    goals = repo.get_goals_by_status(status)
+    if auth.enforce_access and not auth.is_admin:
+        return [g for g in goals if g.student_id in auth.allowed_student_ids]
+    return goals
 
 
 # Overdue goals
 @router.get("/goals/overdue", response_model=List[IEPGoalRead])
-def get_overdue_goals(db: Session = Depends(get_db)):
+def get_overdue_goals(
+    db: Session = Depends(get_db),
+    auth: AuthContext = Depends(get_auth_context),
+):
     """Get goals that are past their end date but still active"""
     repo = GoalRepository(db)
-    return repo.get_overdue_goals()
+    goals = repo.get_overdue_goals()
+    if auth.enforce_access and not auth.is_admin:
+        return [g for g in goals if g.student_id in auth.allowed_student_ids]
+    return goals
 
 
 # Progress reporting
@@ -237,13 +299,15 @@ def get_goal_progress_report(
     goal_id: int,
     date_from: Optional[date] = Query(None, description="Start date for progress report"),
     date_to: Optional[date] = Query(None, description="End date for progress report"),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """Get a progress report for a specific goal"""
     repo = GoalRepository(db)
     goal = repo.get_goal_by_id(goal_id)
     if not goal:
         raise HTTPException(status_code=404, detail="Goal not found")
+    ensure_goal_access(db, auth, goal_id)
     
     # This would need implementation for generating progress reports
     return {
@@ -263,9 +327,11 @@ def get_student_goal_progress(
     student_id: int,
     date_from: Optional[date] = Query(None, description="Start date for progress report"),
     date_to: Optional[date] = Query(None, description="End date for progress report"),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    auth: AuthContext = Depends(get_auth_context),
 ):
     """Get progress report for all goals of a specific student"""
+    ensure_student_access(auth, student_id, action="student goal progress")
     repo = GoalRepository(db)
     goals = repo.get_student_goals(student_id)
     

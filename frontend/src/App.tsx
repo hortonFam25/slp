@@ -18,6 +18,9 @@ import Schools from './features/schools/Schools';
 import Teachers from './features/teachers/Teachers';
 import Settings from './features/settings/Settings';
 import Login from './features/auth/Login';
+import Chat from './features/chat/Chat';
+import ConnectAuthorize from './features/connect/ConnectAuthorize';
+import { readPendingConsent, CONSENT_PATH } from './lib/auth/pendingConsent';
 
 export default function App() {
   const mode = useThemeStore((s) => s.mode);
@@ -50,7 +53,12 @@ export default function App() {
   // and we're not on the login page, show loading (might be processing redirect)
   const currentPath = window.location.pathname;
   const isOnLoginPage = currentPath === '/login';
-  const isOnProtectedRoute = !isOnLoginPage && currentPath !== '/';
+  // The OAuth consent screen renders in BOTH states, like the login page: a
+  // therapist arriving from Claude while signed out must see "sign in to
+  // continue" rather than the spinner below, which never resolves for a
+  // signed-out visitor and would strand the connector flow with no way out.
+  const isOnConsentPage = currentPath === CONSENT_PATH;
+  const isOnProtectedRoute = !isOnLoginPage && !isOnConsentPage && currentPath !== '/';
   
   if (!isAuthenticated && isOnProtectedRoute) {
     return (
@@ -63,17 +71,38 @@ export default function App() {
     );
   }
 
+  // Read once per render; sessionStorage, and empty in every normal session.
+  const pendingConsent = readPendingConsent();
+
   return (
     <ThemeProvider theme={theme}>
       <CssBaseline />
       <Routes>
         {/* Unauthenticated routes */}
         <Route path="/login" element={<Login />} />
+
+        {/* The connector consent screen. Registered outside the authenticated
+            block on purpose: it is entered from Claude, not from the app, and
+            it handles the signed-out case itself (see ConnectAuthorize). */}
+        <Route path={CONSENT_PATH} element={<ConnectAuthorize />} />
         
         {/* Authenticated routes */}
         {isAuthenticated ? (
           <>
-            <Route path="/" element={<Navigate to="/dashboard" replace />} />
+            {/* Entra sends the browser back to the bare origin after
+                sign-in, which loses the OAuth query string. If one was stashed
+                on the way in, replay it instead of landing on the dashboard -
+                otherwise the connector flow dies silently at the sign-in step. */}
+            <Route
+              path="/"
+              element={
+                pendingConsent ? (
+                  <Navigate to={`${CONSENT_PATH}${pendingConsent}`} replace />
+                ) : (
+                  <Navigate to="/dashboard" replace />
+                )
+              }
+            />
             <Route path="/dashboard" element={<AppShell><Dashboard /></AppShell>} />
             <Route path="/analytics" element={<AppShell><Analytics /></AppShell>} />
             <Route path="/students" element={<AppShell><Students /></AppShell>} />
@@ -84,6 +113,7 @@ export default function App() {
             <Route path="/schools" element={<AppShell><Schools /></AppShell>} />
             <Route path="/teachers" element={<AppShell><Teachers /></AppShell>} />
             <Route path="/settings" element={<AppShell><Settings /></AppShell>} />
+            <Route path="/chat" element={<AppShell><Chat /></AppShell>} />
             <Route path="*" element={<Navigate to="/dashboard" replace />} />
           </>
         ) : (

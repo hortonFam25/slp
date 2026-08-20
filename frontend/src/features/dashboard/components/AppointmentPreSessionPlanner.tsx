@@ -16,13 +16,16 @@ import {
   Person,
   Assignment,
   Schedule,
-  CheckCircle
+  CheckCircle,
+  Timeline
 } from '@mui/icons-material';
 import { format } from 'date-fns';
 import { useMutation, useQueryClient, useQuery } from '@tanstack/react-query';
-import { AppointmentSummary, schedulingApi } from '../../../lib/api/scheduling';
+import { AppointmentSummary } from '../../../lib/api/scheduling';
+import { therapySessionsApi } from '../../../lib/api/therapySessions';
 import { useStudentActiveGoals } from '../../../lib/hooks/useStudentGoals';
 import { IEPGoalWithObjectives } from '../../../lib/api/types/goals';
+import { StudentTherapyHistoryDialog } from '../../../components/StudentTherapyHistoryDialog';
 
 interface AppointmentPreSessionPlannerProps {
   selectedAppointment: AppointmentSummary | null;
@@ -42,6 +45,7 @@ export function AppointmentPreSessionPlanner({
   selectedAppointment,
   onClear
 }: AppointmentPreSessionPlannerProps) {
+  const [therapyHistoryOpen, setTherapyHistoryOpen] = useState(false);
   const [objectivesWithNotes, setObjectivesWithNotes] = useState<ObjectiveWithNotes[]>([]);
   const [hasChanges, setHasChanges] = useState(false);
   const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
@@ -61,13 +65,7 @@ export function AppointmentPreSessionPlanner({
     queryFn: async () => {
       if (!selectedAppointment?.id) return null;
       try {
-        // Get therapy session goals/objectives for this appointment
-        const baseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
-        const response = await fetch(`${baseUrl}/api/therapy-sessions/by-appointment/${selectedAppointment.id}`);
-        if (response.ok) {
-          return await response.json();
-        }
-        return null;
+        return await therapySessionsApi.getTherapySessionByAppointment(selectedAppointment.id);
       } catch (error) {
         console.log('No existing session data found for appointment:', selectedAppointment.id);
         return null;
@@ -90,23 +88,9 @@ export function AppointmentPreSessionPlanner({
         pre_session_notes?: string;
       }>;
     }) => {
-      // Update therapy session objectives directly
-      const baseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
-      const response = await fetch(`${baseUrl}/api/therapy-sessions/by-appointment/${data.appointmentId}/objectives`, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
+      return therapySessionsApi.updateSessionObjectivesByAppointment(data.appointmentId, {
           objectives: data.planned_objectives
-        }),
       });
-      
-      if (!response.ok) {
-        throw new Error('Failed to save pre-session notes');
-      }
-      
-      return response.json();
     },
     onSuccess: () => {
       setSaveStatus('saved');
@@ -250,6 +234,7 @@ export function AppointmentPreSessionPlanner({
     setObjectivesWithNotes([]);
     setHasChanges(false);
     setSaveStatus('idle');
+    setTherapyHistoryOpen(false);
     onClear();
   };
 
@@ -258,6 +243,7 @@ export function AppointmentPreSessionPlanner({
     if (selectedAppointment) {
       setHasChanges(false);
       setSaveStatus('idle');
+      setTherapyHistoryOpen(false);
     }
   }, [selectedAppointment?.id]);
 
@@ -328,6 +314,7 @@ export function AppointmentPreSessionPlanner({
   }
 
       return (
+      <>
       <Box sx={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
         {/* Compact Sticky Header */}
         <Box sx={{ 
@@ -374,6 +361,23 @@ export function AppointmentPreSessionPlanner({
                 </Typography>
               )}
               
+              {selectedAppointment.status?.toLowerCase() === 'scheduled' && (
+                <Button
+                  variant="outlined"
+                  size="small"
+                  startIcon={<Timeline />}
+                  onClick={() => setTherapyHistoryOpen(true)}
+                  sx={{ 
+                    minWidth: 'auto', 
+                    px: 1.5,
+                    fontSize: '0.75rem',
+                    height: 28
+                  }}
+                >
+                  Data Sheet
+                </Button>
+              )}
+
               <Button
                 variant="contained"
                 size="small"
@@ -542,5 +546,15 @@ export function AppointmentPreSessionPlanner({
           )}
         </Box>
       </Box>
+
+      {selectedAppointment.status?.toLowerCase() === 'scheduled' && (
+        <StudentTherapyHistoryDialog
+          open={therapyHistoryOpen}
+          onClose={() => setTherapyHistoryOpen(false)}
+          studentId={selectedAppointment.student_id}
+          studentName={selectedAppointment.student_name || `Student ${selectedAppointment.student_id}`}
+        />
+      )}
+      </>
     );
 }

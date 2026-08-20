@@ -1,6 +1,8 @@
 import axios, { AxiosRequestConfig, AxiosResponse } from 'axios';
 import { ApiError, handleApiError } from './errors';
 import { apiLogger } from '../utils/logger';
+import type { IPublicClientApplication } from '@azure/msal-browser';
+import { appScopes } from '../auth/authConfig';
 
 // Create axios instance with default config
 export const apiClient = axios.create({
@@ -12,15 +14,50 @@ export const apiClient = axios.create({
   },
 });
 
+const getMsalInstance = (): IPublicClientApplication | undefined =>
+  (window as unknown as { __msalInstance?: IPublicClientApplication }).__msalInstance;
+
+export const getAccessToken = async (): Promise<string | null> => {
+  const msal = getMsalInstance();
+  if (!msal) {
+    return null;
+  }
+
+  const account = msal.getActiveAccount() || msal.getAllAccounts()[0];
+  if (!account) {
+    return null;
+  }
+
+  try {
+    const token = await msal.acquireTokenSilent({ account, scopes: appScopes });
+    return token.accessToken;
+  } catch {
+    apiLogger.warn('Token acquisition skipped for request');
+    return null;
+  }
+};
+
+export const buildAuthenticatedFetchHeaders = async (
+  headers: HeadersInit = {}
+): Promise<Headers> => {
+  const mergedHeaders = new Headers(headers);
+  const token = await getAccessToken();
+  if (token && !mergedHeaders.has('Authorization')) {
+    mergedHeaders.set('Authorization', `Bearer ${token}`);
+  }
+  return mergedHeaders;
+};
+
 // Request interceptor - for adding auth tokens, request logging, etc.
 apiClient.interceptors.request.use(
-  (config) => {
-    // Auth token will be added per request via authorizedGet/authorizedPost functions
-    // This allows for proper token refresh handling per request
-    
-    // Log requests in development
+  async (config) => {
+    const token = await getAccessToken();
+    if (token) {
+      config.headers = config.headers || {};
+      config.headers.Authorization = `Bearer ${token}`;
+    }
+
     apiLogger.apiRequest(config.method || 'UNKNOWN', config.url || 'unknown');
-    
     return config;
   },
   (error) => {

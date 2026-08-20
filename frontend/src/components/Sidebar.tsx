@@ -1,5 +1,8 @@
-import { Box, List, ListItem, ListItemButton, ListItemIcon, ListItemText, Typography, Tooltip } from '@mui/material';
+import { Avatar, Box, Button, IconButton, List, ListItem, ListItemButton, ListItemIcon, ListItemText, Menu, MenuItem, Tooltip, Typography } from '@mui/material';
 import { Link, useLocation } from 'react-router-dom';
+import { useMsal } from '@azure/msal-react';
+import { useMemo, useState } from 'react';
+import type { MouseEvent } from 'react';
 import { 
   LayoutDashboard, 
   BarChart3,
@@ -9,28 +12,44 @@ import {
   Calendar, 
   GraduationCap, 
   UserSquare2,
-  Settings 
+  Settings,
+  MessageSquare,
+  Menu as MenuIcon,
 } from 'lucide-react';
 
 interface SidebarProps {
   open?: boolean;
   onNavigate?: () => void;
+  onToggle?: () => void;
 }
 
 const navigationItems = [
   { path: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
+  { path: '/therapy', label: 'Therapy', icon: Stethoscope },
+  { path: '/chat', label: 'AI Chat', icon: MessageSquare },
+  { path: '/schedule', label: 'Schedule', icon: Calendar },
   { path: '/students', label: 'Students', icon: UsersRound },
   { path: '/goals', label: 'Goals', icon: Target },
-  { path: '/therapy', label: 'Therapy', icon: Stethoscope },
-  { path: '/schedule', label: 'Schedule', icon: Calendar },
+  { path: '/teachers', label: 'Support Staff', icon: UserSquare2 },
   { path: '/schools', label: 'Schools', icon: GraduationCap },
-  { path: '/teachers', label: 'Teachers', icon: UserSquare2 },
-  { path: '/settings', label: 'Settings', icon: Settings },
   { path: '/analytics', label: 'Analytics', icon: BarChart3 },
+  { path: '/settings', label: 'Settings', icon: Settings },
 ];
 
-export function Sidebar({ open = true, onNavigate }: SidebarProps) {
+export function Sidebar({ open = true, onNavigate, onToggle }: SidebarProps) {
   const location = useLocation();
+  const { instance } = useMsal();
+  const account = useMemo(() => instance.getActiveAccount(), [instance]);
+  const [anchorEl, setAnchorEl] = useState<null | HTMLElement>(null);
+  const isMenuOpen = Boolean(anchorEl);
+
+  const onMenu = (e: MouseEvent<HTMLButtonElement>) => setAnchorEl(e.currentTarget);
+  const onClose = () => setAnchorEl(null);
+
+  const signOut = () => {
+    instance.clearCache();
+    window.location.href = '/login';
+  };
 
   return (
     <Box
@@ -61,34 +80,40 @@ export function Sidebar({ open = true, onNavigate }: SidebarProps) {
           minHeight: 84, // Consistent height regardless of state
         }}
       >
-        {open ? (
-          <img
-            src="/images/SLPro.png"
-            alt="SLP Pro"
-            style={{
-              height: '60px',
-              width: 'auto',
-              maxWidth: '100%',
-            }}
-          />
-        ) : (
-          <Box
-            sx={{
-              width: 32,
-              height: 32,
-              borderRadius: '6px',
-              bgcolor: 'primary.main',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              color: 'white',
-              fontWeight: 'bold',
-              fontSize: '1.2rem',
-            }}
-          >
-            S
-          </Box>
-        )}
+        <Box sx={{ display: 'flex', justifyContent: 'center', width: '100%' }}>
+          {open ? (
+            <img
+              src="/images/SLPro.png"
+              alt="SLP Pro"
+              style={{
+                height: '60px',
+                width: 'auto',
+                maxWidth: '100%',
+              }}
+            />
+          ) : (
+            <Tooltip title="Expand sidebar" placement="right" arrow>
+              <IconButton onClick={onToggle} aria-label="expand sidebar">
+                <Box
+                  sx={{
+                    width: 32,
+                    height: 32,
+                    borderRadius: '6px',
+                    bgcolor: 'primary.main',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    color: 'white',
+                    fontWeight: 'bold',
+                    fontSize: '1.2rem',
+                  }}
+                >
+                  S
+                </Box>
+              </IconButton>
+            </Tooltip>
+          )}
+        </Box>
       </Box>
       
       {/* Scrollable Navigation */}
@@ -155,6 +180,63 @@ export function Sidebar({ open = true, onNavigate }: SidebarProps) {
             );
           })}
         </List>
+      </Box>
+
+      {onToggle && (
+        <Box
+          sx={{
+            px: open ? 2 : 1,
+            pb: 0.75,
+            display: 'flex',
+            justifyContent: open ? 'flex-start' : 'center',
+            flexShrink: 0,
+          }}
+        >
+          <Box
+            sx={{ display: 'flex' }}
+          >
+            <Tooltip title={open ? 'Collapse sidebar' : 'Expand sidebar'} placement="right" arrow>
+              <IconButton
+                onClick={onToggle}
+                aria-label={open ? 'collapse sidebar' : 'expand sidebar'}
+                size="small"
+              >
+                <MenuIcon size={16} />
+              </IconButton>
+            </Tooltip>
+          </Box>
+        </Box>
+      )}
+
+      <Box
+        sx={{
+          p: open ? 2 : 1,
+          borderTop: 1,
+          borderColor: 'divider',
+          flexShrink: 0,
+        }}
+      >
+        {open ? (
+          <Button
+            onClick={onMenu}
+            startIcon={<Avatar sx={{ width: 24, height: 24 }}>{(account?.name || '?').slice(0, 1)}</Avatar>}
+            fullWidth
+            sx={{ justifyContent: 'flex-start', textTransform: 'none', color: 'text.primary' }}
+          >
+            <Typography noWrap sx={{ maxWidth: 140 }}>
+              {account?.name || account?.username || 'User'}
+            </Typography>
+          </Button>
+        ) : (
+          <Tooltip title={account?.name || account?.username || 'User'} placement="right" arrow>
+            <IconButton onClick={onMenu} sx={{ width: '100%' }}>
+              <Avatar sx={{ width: 28, height: 28 }}>{(account?.name || '?').slice(0, 1)}</Avatar>
+            </IconButton>
+          </Tooltip>
+        )}
+        <Menu anchorEl={anchorEl} open={isMenuOpen} onClose={onClose} anchorOrigin={{ vertical: 'top', horizontal: 'right' }}>
+          <MenuItem onClick={() => { onClose(); signOut(); }}>Sign out</MenuItem>
+        </Menu>
       </Box>
     </Box>
   );

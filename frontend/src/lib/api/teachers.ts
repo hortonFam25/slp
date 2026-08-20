@@ -7,7 +7,8 @@ import type {
   TeachersFilters,
   TeacherStatistics,
   StudentTeacherAssignment,
-  CreateStudentTeacherAssignmentRequest
+  CreateStudentTeacherAssignmentRequest,
+  SupportStaffRole
 } from './types/teachers';
 import type {
   TeacherSchoolAssignment,
@@ -25,6 +26,7 @@ class TeachersApiService extends BaseApiService {
     if (filters) {
       if (filters.is_active !== undefined) params.append('is_active', filters.is_active.toString());
       if (filters.school_id !== undefined) params.append('school_id', filters.school_id.toString());
+      if (filters.role_id !== undefined) params.append('role_id', filters.role_id.toString());
       if (filters.department) params.append('department', filters.department);
       if (filters.search) params.append('search', filters.search);
       if (filters.skip !== undefined) params.append('skip', filters.skip.toString());
@@ -72,6 +74,12 @@ class TeachersApiService extends BaseApiService {
     return this.get('/departments');
   }
 
+  async getRoles(activeOnly = true): Promise<SupportStaffRole[]> {
+    const params = new URLSearchParams();
+    params.append('active_only', activeOnly.toString());
+    return this.get(`/roles?${params.toString()}`);
+  }
+
   // Student-Teacher Assignment methods
   async assignStudentToTeacher(assignment: CreateStudentTeacherAssignmentRequest): Promise<StudentTeacherAssignment> {
     return this.post('/student-teacher-assignments', assignment);
@@ -112,5 +120,6 @@ export type {
   TeachersFilters,
   TeacherStatistics,
   StudentTeacherAssignment,
-  CreateStudentTeacherAssignmentRequest
+  CreateStudentTeacherAssignmentRequest,
+  SupportStaffRole
 } from './types/teachers';

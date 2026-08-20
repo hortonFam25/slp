@@ -1,3 +1,11 @@
+export interface SupportStaffRole {
+  id: number;
+  name: string;
+  is_active: boolean;
+  created_date: string;
+  modified_date: string;
+}
+
 // Teacher types
 export interface Teacher {
   id: number;
@@ -19,6 +27,7 @@ export interface Teacher {
   primary_school_name?: string;
   current_schools_names?: string[];
   active_schools_count?: number;
+  roles?: SupportStaffRole[];
 }
 
 export interface TeacherSummary {
@@ -44,6 +53,7 @@ export interface CreateTeacherRequest {
   preferred_contact_method?: string;
   notes?: string;
   is_active?: boolean;
+  role_ids?: number[];
 }
 
 export interface UpdateTeacherRequest {
@@ -57,11 +67,13 @@ export interface UpdateTeacherRequest {
   preferred_contact_method?: string;
   notes?: string;
   is_active?: boolean;
+  role_ids?: number[];
 }
 
 export interface TeachersFilters {
   is_active?: boolean;
   school_id?: number;
+  role_id?: number;
   department?: string;
   search?: string;
   skip?: number;

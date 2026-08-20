@@ -1,26 +1,46 @@
-import { Button, Stack, TextField, Typography } from '@mui/material';
+import { Box, Button, FormControlLabel, Stack, Switch, TextField, Typography } from '@mui/material';
 import { useState } from 'react';
 import { Settings as SettingsIcon } from 'lucide-react';
+import { useThemeStore } from '../../lib/stores/themeStore';
 
 export default function Settings() {
   const [apiBaseUrl, setApiBaseUrl] = useState<string>(import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000');
+  const mode = useThemeStore((s) => s.mode);
+  const toggle = useThemeStore((s) => s.toggle);
+
   return (
-    <Stack spacing={3}>
-      <Typography variant="h4" sx={{
-        display: 'flex',
-        alignItems: 'center',
-        color: '#41AAB7',
-        fontWeight: 700,
-        gap: 2
-      }}>
-        <SettingsIcon size={32} />
-        Settings
-      </Typography>
+    <Box sx={{ p: { xs: 1.5, sm: 2 }, height: '100%', minHeight: 0, overflow: 'auto' }}>
       <Stack spacing={2}>
-        <TextField label="API Base URL" value={apiBaseUrl} onChange={(e) => setApiBaseUrl(e.target.value)} helperText="Set via VITE_API_BASE_URL" />
-        <Button variant="outlined" onClick={() => navigator.clipboard.writeText(apiBaseUrl)}>Copy</Button>
+        <Typography
+          component="h1"
+          sx={{
+            display: 'flex',
+            alignItems: 'center',
+            color: '#41AAB7',
+            fontWeight: 700,
+            gap: 1.25,
+            fontSize: { xs: '1.35rem', sm: '1.5rem' },
+            lineHeight: 1.2,
+            position: 'sticky',
+            top: 0,
+            zIndex: 2,
+            bgcolor: 'background.default',
+            py: 0.25,
+          }}
+        >
+          <SettingsIcon size={24} />
+          Settings
+        </Typography>
+        <Stack spacing={2}>
+          <FormControlLabel
+            control={<Switch checked={mode === 'dark'} onChange={toggle} />}
+            label="Dark mode"
+          />
+          <TextField label="API Base URL" value={apiBaseUrl} onChange={(e) => setApiBaseUrl(e.target.value)} helperText="Set via VITE_API_BASE_URL" />
+          <Button variant="outlined" onClick={() => navigator.clipboard.writeText(apiBaseUrl)}>Copy</Button>
+        </Stack>
       </Stack>
-    </Stack>
+    </Box>
   );
 }
 

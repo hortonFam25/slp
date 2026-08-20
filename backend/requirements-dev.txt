@@ -1,0 +1,19 @@
+# Development / CI-only dependencies.
+#
+# The runtime dependency set lives in requirements.txt and is what ships in the
+# deployment zip. Nothing here is installed on the App Service — it exists so
+# `.github/workflows/ci.yml` (and a developer on Windows) can run the linter and
+# the smoke suite.
+#
+#   pip install -r backend/requirements.txt -r backend/requirements-dev.txt
+#
+# Versions match the [tool.poetry.group.dev.dependencies] block in pyproject.toml
+# so the local runbook, poetry and CI all agree.
+
+pytest==7.4.4
+ruff==0.4.8
+
+# fastapi.testclient is a thin wrapper over httpx and refuses to import without
+# it. It is already pinned in requirements.txt; repeated here (same pin) so the
+# dev file stands on its own.
+httpx==0.27.2

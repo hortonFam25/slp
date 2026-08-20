@@ -134,6 +134,7 @@ class SchedulingStudentRepository:
         
         return StudentScheduleView(
             id=student.id,
+            student_alias=student.student_alias or f"student_{student.id}",
             first=student.first,
             last=student.last,
             uic=student.uic,

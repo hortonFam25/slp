@@ -6,7 +6,8 @@ import type {
   CreateTeacherRequest,
   UpdateTeacherRequest,
   TeachersFilters,
-  TeacherStatistics
+  TeacherStatistics,
+  SupportStaffRole
 } from '../api/types/teachers';
 import type {
   TeacherSchoolAssignment,
@@ -30,6 +31,7 @@ interface UseTeachersActions {
   deleteTeacher: (teacherId: number) => Promise<void>;
   getTeacher: (teacherId: number) => Promise<Teacher>;
   getTeacherStatistics: (teacherId: number) => Promise<TeacherStatistics>;
+  getRoles: (activeOnly?: boolean) => Promise<SupportStaffRole[]>;
   getTeachersBySchool: (schoolId: number, currentOnly?: boolean) => Promise<TeacherSummary[]>;
   // Teacher-School Assignment methods
   getTeacherSchoolAssignments: (teacherId: number) => Promise<TeacherSchoolAssignment[]>;
@@ -172,6 +174,18 @@ export function useTeachers(initialFilters?: TeachersFilters): UseTeachersState 
     }
   }, [setError]);
 
+  const getRoles = useCallback(async (activeOnly = true): Promise<SupportStaffRole[]> => {
+    try {
+      setError(null);
+      return await teachersApi.getRoles(activeOnly);
+    } catch (error) {
+      console.error('Error fetching support staff roles:', error);
+      const errorMessage = error instanceof Error ? error.message : 'Failed to fetch support staff roles';
+      setError(errorMessage);
+      throw error;
+    }
+  }, [setError]);
+
   const getTeachersBySchool = useCallback(async (schoolId: number, currentOnly = true): Promise<TeacherSummary[]> => {
     try {
       setError(null);
@@ -256,6 +270,7 @@ export function useTeachers(initialFilters?: TeachersFilters): UseTeachersState 
     deleteTeacher,
     getTeacher,
     getTeacherStatistics,
+    getRoles,
     getTeachersBySchool,
     getTeacherSchoolAssignments,
     createTeacherSchoolAssignment,

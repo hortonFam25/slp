@@ -105,3 +105,9 @@ frontend_deploy.zip
 deploy_temp/
 deploy_frontend_temp/
 backend/local.db
+
+# Python virtual envs
+venv/
+.venv/
+__pycache__/
+*.pyc

@@ -613,10 +613,14 @@ export default function Schedule() {
       }}>
         {/* Header */}
         <Box sx={{ 
-          mb: isMobile ? 1.5 : 2, 
+          mb: 1.5, 
           flexShrink: 0,
-          px: isMobile ? 1.5 : 2,
-          pt: isMobile ? 1.5 : 2
+          px: { xs: 1.5, sm: 2 },
+          pt: { xs: 1.5, sm: 2 },
+          position: 'sticky',
+          top: 0,
+          zIndex: 2,
+          bgcolor: 'background.default',
         }}>
           <Box sx={{ 
             display: 'flex', 
@@ -627,19 +631,19 @@ export default function Schedule() {
             gap: isMobile ? 1.5 : 0
           }}>
             <Box>
-              <Typography 
-                variant={isMobile ? "h5" : "h4"} 
-                component="h1" 
-                sx={{ 
-                  display: 'flex', 
+              <Typography
+                component="h1"
+                sx={{
+                  display: 'flex',
                   alignItems: 'center',
                   color: '#41AAB7',
                   fontWeight: 700,
-                  fontSize: isMobile ? '1.5rem' : undefined,
-                  gap: 2
+                  gap: 1.25,
+                  fontSize: { xs: '1.35rem', sm: '1.5rem' },
+                  lineHeight: 1.2,
                 }}
               >
-                <Calendar size={isMobile ? 24 : 32} />
+                <Calendar size={24} />
                 Schedule
               </Typography>
             </Box>
@@ -666,8 +670,8 @@ export default function Schedule() {
           overflow: 'hidden',
           display: 'flex',
           flexDirection: 'column',
-          px: isMobile ? 1.5 : 2,
-          pb: isMobile ? 1.5 : 2
+          px: { xs: 1.5, sm: 2 },
+          pb: { xs: 1.5, sm: 2 }
         }}>
           {/* Error Alert */}
           {error && error.trim() && (

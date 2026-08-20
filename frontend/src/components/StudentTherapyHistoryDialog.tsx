@@ -109,7 +109,10 @@ export function StudentTherapyHistoryDialog({
           width: isMobile ? '100%' : '95vw',
           height: isMobile ? '100%' : '90vh',
           maxWidth: 'none',
-          m: isMobile ? 0 : 2
+          m: isMobile ? 0 : 2,
+          display: 'flex',
+          flexDirection: 'column',
+          overflow: 'hidden'
         }
       }}
     >
@@ -144,7 +147,16 @@ export function StudentTherapyHistoryDialog({
         </IconButton>
       </DialogTitle>
 
-      <DialogContent sx={{ p: 0, overflow: 'hidden' }}>
+      <DialogContent
+        sx={{
+          p: 0,
+          overflow: 'hidden',
+          display: 'flex',
+          flexDirection: 'column',
+          flex: 1,
+          minHeight: 0
+        }}
+      >
         {loading ? (
           <Box
             sx={{
@@ -172,12 +184,13 @@ export function StudentTherapyHistoryDialog({
             </Alert>
           </Box>
         ) : (
-          <Box sx={{ height: '100%', overflow: 'hidden' }}>
+          <Box sx={{ height: '100%', overflow: 'hidden', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
             <GridProgressView
               studentId={studentId}
               availableGoals={studentGoals}
               session={mockSession}
               disabled={false} // Allow editing
+              showDateNavigator
               onUpdateObjectiveProgress={(objectiveId, updates) => {
                 // The GridProgressView handles its own API calls
                 // No additional handling needed here

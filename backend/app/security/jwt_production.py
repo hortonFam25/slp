@@ -1,12 +1,22 @@
 """
-Production-ready JWT validation for Azure AD tokens.
-Replace the placeholder jwt.py with this implementation for deployment.
+Real JWT validation for Entra ID (Azure AD) access tokens.
+
+This is the validator every non-development environment uses; which one is
+picked, and where, is app/security/validator.py. Nothing should import this
+module directly except that one.
+
+Signature, audience, issuer and expiry are all verified against the tenant's
+published JWKS. The keys are fetched on demand and cached by PyJWKClient, so
+the FIRST request after a cold start pays one HTTPS round trip to
+login.microsoftonline.com and the rest pay nothing.
 """
-from typing import Optional, Dict, Any
-import requests
+from functools import lru_cache
+from typing import Optional
+
 import jwt
-from jwt import PyJWKSClient
+from jwt import PyJWKClient
 from pydantic import BaseModel
+
 from app.settings import settings
 
 
@@ -16,6 +26,9 @@ class TokenClaims(BaseModel):
     iss: Optional[str] = None
     name: Optional[str] = None
     preferred_username: Optional[str] = None
+    email: Optional[str] = None
+    upn: Optional[str] = None
+    unique_name: Optional[str] = None
     oid: Optional[str] = None  # Azure AD object ID
     tid: Optional[str] = None  # Azure AD tenant ID
 
@@ -26,10 +39,14 @@ class JWTValidator:
         self.client_id = settings.aad_client_id
         self.issuer = f"https://login.microsoftonline.com/{self.tenant_id}/v2.0"
         self.jwks_uri = f"https://login.microsoftonline.com/{self.tenant_id}/discovery/v2.0/keys"
-        self.audience = "api://604604d7-697a-4111-8845-a1bc1014bd49"
-        
-        # Initialize JWKS client for key retrieval
-        self.jwks_client = PyJWKSClient(self.jwks_uri)
+        # The API scope this installation registered. Configurable (env:
+        # AAD_API_AUDIENCE) but defaulted to the existing registration, so a
+        # deployment that sets nothing keeps working.
+        self.audience = settings.aad_api_audience
+
+        # Initialize JWKS client for key retrieval. Constructing it fetches
+        # nothing; the first validated token does.
+        self.jwks_client = PyJWKClient(self.jwks_uri)
     
     def validate_jwt(self, token: str) -> TokenClaims:
         """Validate Azure AD JWT token"""
@@ -68,10 +85,19 @@ class JWTValidator:
             raise ValueError(f"Token validation failed: {str(e)}")
 
 
-# Global validator instance
-jwt_validator = JWTValidator()
+@lru_cache(maxsize=1)
+def get_validator() -> JWTValidator:
+    """
+    The process-wide validator, built on first use.
+
+    Lazy rather than a module-level instance: this module is imported by the
+    validator seam, which is imported by the auth dependency, which is imported
+    by every router — and a development run must not build a JWKS client for a
+    tenant it does not have.
+    """
+    return JWTValidator()
 
 
 def validate_jwt(token: str) -> TokenClaims:
     """Main function to validate JWT tokens"""
-    return jwt_validator.validate_jwt(token)
+    return get_validator().validate_jwt(token)

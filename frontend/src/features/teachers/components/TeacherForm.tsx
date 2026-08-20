@@ -22,7 +22,7 @@ import {
 import { Save, Cancel, Add, Delete } from '@mui/icons-material';
 import { useSchools } from '../../../lib/hooks/useSchools';
 import { useTeachers } from '../../../lib/hooks/useTeachers';
-import type { Teacher, CreateTeacherRequest, UpdateTeacherRequest, ContactMethod } from '../../../lib/api/types/teachers';
+import type { Teacher, CreateTeacherRequest, UpdateTeacherRequest, ContactMethod, SupportStaffRole } from '../../../lib/api/types/teachers';
 import type { SchoolSummary } from '../../../lib/api/types/schools';
 
 interface TeacherFormProps {
@@ -48,7 +48,8 @@ export function TeacherForm({ teacher, onSubmit, onCancel }: TeacherFormProps) {
     getTeacherSchoolAssignments, 
     createTeacherSchoolAssignment, 
     updateTeacherSchoolAssignment, 
-    deleteTeacherSchoolAssignment 
+    deleteTeacherSchoolAssignment,
+    getRoles
   } = useTeachers();
   
   const [formData, setFormData] = useState({
@@ -66,6 +67,8 @@ export function TeacherForm({ teacher, onSubmit, onCancel }: TeacherFormProps) {
 
   const [schoolAssignments, setSchoolAssignments] = useState<SchoolAssignment[]>([]);
   const [originalAssignments, setOriginalAssignments] = useState<SchoolAssignment[]>([]);
+  const [roleOptions, setRoleOptions] = useState<SupportStaffRole[]>([]);
+  const [selectedRoleIds, setSelectedRoleIds] = useState<number[]>([]);
   const [selectedSchool, setSelectedSchool] = useState<SchoolSummary | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string>('');
@@ -98,12 +101,15 @@ export function TeacherForm({ teacher, onSubmit, onCancel }: TeacherFormProps) {
           // Load all required data in parallel
           await Promise.all([
             fetchSchoolsSummary(true),
-            loadTeacherSchoolAssignments(teacher.id)
+            loadTeacherSchoolAssignments(teacher.id),
+            loadRoles()
           ]);
+
+          setSelectedRoleIds((teacher.roles || []).map((role) => role.id));
           
         } catch (error) {
-          console.error('Failed to initialize teacher form:', error);
-          setError('Failed to load teacher data');
+          console.error('Failed to initialize support staff form:', error);
+          setError('Failed to load support staff data');
         } finally {
           setInitializing(false);
         }
@@ -111,9 +117,10 @@ export function TeacherForm({ teacher, onSubmit, onCancel }: TeacherFormProps) {
         // New teacher - just load schools
         setInitializing(true);
         try {
-          await fetchSchoolsSummary(true);
+          await Promise.all([fetchSchoolsSummary(true), loadRoles()]);
           setSchoolAssignments([]);
           setOriginalAssignments([]);
+          setSelectedRoleIds([]);
           setShowAddAssignment(false);
         } catch (error) {
           console.error('Failed to load schools:', error);
@@ -149,8 +156,18 @@ export function TeacherForm({ teacher, onSubmit, onCancel }: TeacherFormProps) {
       setSchoolAssignments(formattedAssignments);
       setOriginalAssignments([...formattedAssignments]); // Deep copy for comparison
     } catch (error) {
-      console.error('Failed to load teacher school assignments:', error);
+      console.error('Failed to load support staff school assignments:', error);
       throw error; // Re-throw so the parent can handle it
+    }
+  };
+
+  const loadRoles = async () => {
+    try {
+      const roles = await getRoles(true);
+      setRoleOptions(roles);
+    } catch (error) {
+      console.error('Failed to load support staff roles:', error);
+      throw error;
     }
   };
 
@@ -224,7 +241,8 @@ export function TeacherForm({ teacher, onSubmit, onCancel }: TeacherFormProps) {
       // Filter out empty preferred_contact_method
       const submitData = {
         ...formData,
-        preferred_contact_method: formData.preferred_contact_method || undefined
+        preferred_contact_method: formData.preferred_contact_method || undefined,
+        role_ids: selectedRoleIds
       };
       
       // First, save the teacher data
@@ -252,7 +270,7 @@ export function TeacherForm({ teacher, onSubmit, onCancel }: TeacherFormProps) {
       onCancel(); // This will close the modal
       
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to save teacher');
+      setError(err instanceof Error ? err.message : 'Failed to save support staff member');
     } finally {
       setSubmitting(false);
     }
@@ -278,7 +296,7 @@ export function TeacherForm({ teacher, onSubmit, onCancel }: TeacherFormProps) {
     
     // Check if school is already assigned
     if (schoolAssignments.some(assignment => assignment.school.id === selectedSchool.id && !assignment.isDeleted)) {
-      setError('This school is already assigned to the teacher');
+      setError('This school is already assigned to this support staff member');
       return;
     }
 
@@ -350,7 +368,7 @@ export function TeacherForm({ teacher, onSubmit, onCancel }: TeacherFormProps) {
       <Box sx={{ p: 3, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: 400 }}>
         <CircularProgress sx={{ color: '#40A8B6', mb: 2 }} size={40} />
         <Typography variant="body1" color="#40A8B6" sx={{ fontWeight: 500 }}>
-          {teacher ? 'Loading teacher data...' : 'Loading schools...'}
+          {teacher ? 'Loading support staff data...' : 'Loading schools...'}
         </Typography>
         <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
           Please wait while we prepare the form
@@ -395,6 +413,25 @@ export function TeacherForm({ teacher, onSubmit, onCancel }: TeacherFormProps) {
             />
           </Grid>
 
+          <Grid item xs={12}>
+            <Autocomplete
+              multiple
+              options={roleOptions}
+              getOptionLabel={(option) => option.name}
+              value={roleOptions.filter((role) => selectedRoleIds.includes(role.id))}
+              onChange={(_, selectedRoles) => setSelectedRoleIds(selectedRoles.map((role) => role.id))}
+              renderInput={(params) => (
+                <TextField
+                  {...params}
+                  label="Support Staff Roles"
+                  placeholder="Select one or more roles"
+                />
+              )}
+              disableCloseOnSelect
+              isOptionEqualToValue={(option, value) => option.id === value.id}
+            />
+          </Grid>
+
           <Grid item xs={12} md={6}>
             <TextField
               fullWidth
@@ -419,7 +456,7 @@ export function TeacherForm({ teacher, onSubmit, onCancel }: TeacherFormProps) {
               label="Title/Position"
               value={formData.title}
               onChange={handleChange('title')}
-              placeholder="e.g., General Education Teacher, Special Education Teacher"
+              placeholder="e.g., Teacher, Case Manager, Social Worker"
               sx={{
                 '& .MuiOutlinedInput-root': {
                   '&.Mui-focused fieldset': {
@@ -462,7 +499,7 @@ export function TeacherForm({ teacher, onSubmit, onCancel }: TeacherFormProps) {
               type="email"
               value={formData.email}
               onChange={handleChange('email')}
-              placeholder="teacher@school.edu"
+              placeholder="staff@school.edu"
               sx={{
                 '& .MuiOutlinedInput-root': {
                   '&.Mui-focused fieldset': {
@@ -775,7 +812,7 @@ export function TeacherForm({ teacher, onSubmit, onCancel }: TeacherFormProps) {
               label="Notes"
               value={formData.notes}
               onChange={handleChange('notes')}
-              placeholder="Add any additional notes about the teacher..."
+              placeholder="Add any additional notes about this support staff member..."
               multiline
               rows={3}
               sx={{
@@ -804,7 +841,7 @@ export function TeacherForm({ teacher, onSubmit, onCancel }: TeacherFormProps) {
                   }}
                 />
               }
-              label="Teacher is active"
+              label="Support staff member is active"
             />
           </Grid>
         </Grid>
@@ -843,7 +880,7 @@ export function TeacherForm({ teacher, onSubmit, onCancel }: TeacherFormProps) {
               px: 3
             }}
           >
-            {submitting ? 'Saving...' : teacher ? 'Update Teacher' : 'Create Teacher'}
+            {submitting ? 'Saving...' : teacher ? 'Update Support Staff' : 'Create Support Staff'}
           </Button>
         </Box>
       </form>
