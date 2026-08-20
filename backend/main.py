@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.settings import settings
 from app.routers import health, students, csv_import, goals, objectives, progress_entries, schools, teachers, scheduling, therapy_sessions, eligibilities, goals_import, ai_chat, auth_access, api_tokens
 from app.routers import oauth_public
+from app.routers import import_upload
 from app.db import database
 from app.mcp import McpAuthMiddleware, mcp_asgi_app, mcp_server
 
@@ -54,6 +55,14 @@ app.add_middleware(
 app.include_router(oauth_public.router)
 # The human half of the same flow: /api/oauth/consent, behind the session gate.
 app.include_router(oauth_public.consent_router)
+
+# The blind import's upload door, registered early for the same reason as the
+# OAuth facade: it lives outside /api (the URL is handed to a human, who has to
+# be able to read it back off a screen) and it is unauthenticated by design,
+# because the URL itself is the one-shot credential. Registering it ahead of the
+# /api routers means no later catch-all can claim /import/*.
+# include_in_schema=False is set on the router itself.
+app.include_router(import_upload.router)
 
 app.include_router(health.router, prefix="/api/health", tags=["health"])
 app.include_router(auth_access.router)

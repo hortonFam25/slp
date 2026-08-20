@@ -45,6 +45,7 @@ from app.models.goal_objective import GoalObjective
 from app.models.iep_goal import IEPGoal
 from app.models.objective_progress_entry import ObjectiveProgressEntry
 from app.models.student import Student
+from app.models.import_batch import ImportBatch
 from app.models.therapy_session import TherapySession
 from app.repositories.appointment_repository import AppointmentRepository
 from app.repositories.eligibility_repository import EligibilityRepository
@@ -59,6 +60,7 @@ from app.repositories.student_repository import StudentRepository
 from app.repositories.teacher_repository import TeacherRepository
 from app.repositories.therapy_session_repository import TherapySessionRepository
 from app.repositories.time_block_repository import TimeBlockRepository
+from app.services import blind_import
 from app.routers.therapy_sessions import (
     _build_session_response,
     _build_session_summary,
@@ -82,6 +84,7 @@ from app.schemas.therapy_session import (
     TherapySessionCreate,
     TherapySessionFilters,
 )
+from app.settings import settings
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +133,41 @@ categories a student qualifies under).
 
 Dates are ISO-8601 strings: "2026-05-14" for a date, "2026-05-14T10:30:00" for
 a time.
+
+NEVER ACCEPT A PASTED ROSTER. If a therapist pastes spreadsheet rows, a list of
+students, a CSV, a screenshot of a caseload, or "here are my kids" in any form
+into this conversation, do not work with it. Say plainly that you should not be
+handling children's names and birthdays in a chat window, and give her an
+upload link instead: call create_import_upload and hand her the URL. This is
+not a preference. A pasted roster is a permanent copy of identified student
+data in a transcript store, and the import tools exist precisely so that no
+such copy is ever made.
+
+IMPORTING A CASELOAD FROM A SPREADSHEET OF ANY LAYOUT works like this, and the
+design is that YOU NEVER SEE THE DATA:
+
+  1. create_import_upload gives you a one-shot, 30-minute URL. The therapist
+     opens it in her own browser and uploads the .xlsx or .csv. The file goes
+     from her machine to the server without passing through you.
+  2. get_import_preview shows you the file's SHAPE and nothing else: every cell
+     masked as "Xxxxxxx" or "##/##/####", per-column counts, and the header
+     text. That is enough to work out what each column is.
+  3. set_import_mapping is where you say which column means what. Only then,
+     and only for columns mapped to school, teacher, case_manager, grade_level,
+     enrollment_status, the three IEP dates or eligibility, do real sample
+     values come back. Names, dates of birth, UICs and free-text notes stay
+     masked no matter what they are mapped to and no matter how you ask.
+  4. validate_import reports problems by ROW NUMBER, with the offending value
+     only where that value is a school or a teacher — the things you are meant
+     to reconcile against list_schools and list_teachers.
+  5. commit_import (confirm=true) creates the students from the stored file and
+     hands you back aliases, never names.
+  6. discard_import (confirm=true) destroys the staged copy. Offer it as soon
+     as the import is done.
+
+Work with the therapist at every step: propose the mapping in plain language
+and let her correct it. She can see the spreadsheet; you cannot, and that is
+the arrangement working, not a limitation to route around.
 """
 
 # DNS-rebinding protection is the SDK's default when it thinks it is serving
@@ -1534,6 +1572,247 @@ def delete_goal(goal_id: int, confirm: bool = False) -> dict:
             }
         GoalRepository(db).delete_goal(goal_id)
         return {"deleted": True, "removed": summary}
+    finally:
+        db.close()
+
+
+# --------------------------------------------------------------------------
+# staged caseload import
+# --------------------------------------------------------------------------
+# Six tools around one idea: the spreadsheet enters the server through the
+# therapist's own browser, and what crosses this connection is its STRUCTURE.
+# See app/services/blind_import.py for the whole argument; the tools here are
+# thin, because everything they do has to be identical to what the upload route
+# does and neither may be the authority.
+
+
+def _import_batch(db: Session, ctx: McpPrincipal, batch_id: int) -> ImportBatch:
+    """The caller's own batch, or a refusal. No admin override -- see get_batch."""
+    return blind_import.get_batch(db, batch_id, ctx.user_id)
+
+
+@tool()
+def create_import_upload() -> dict:
+    """
+    START HERE to import a caseload from a spreadsheet of ANY layout. Creates an
+    empty import batch and returns a one-shot upload link for the therapist to
+    open in her own browser.
+
+    Give her the `uploadUrl` and ask her to upload the file there. DO NOT ask
+    her to paste the spreadsheet, its rows, or a sample of it into this
+    conversation -- that would put children's names, birthdays and state
+    identifiers into a chat transcript, which is the exact thing this whole
+    mechanism exists to avoid. If she pastes one anyway, say so, do not work
+    with it, and offer this link instead.
+
+    The link works ONCE and expires in 30 minutes. Nothing has been imported
+    when it comes back; the file is only staged.
+
+    Then: get_import_preview -> set_import_mapping -> validate_import ->
+    commit_import -> discard_import.
+    """
+    db = _session()
+    try:
+        ctx = _ctx()
+        batch, secret = blind_import.create_batch(db, ctx.user_id)
+        origin = settings.public_origin.rstrip("/")
+        return {
+            "batchId": batch.id,
+            "uploadUrl": f"{origin}/import/upload/{secret}",
+            "expiresInMinutes": int(
+                blind_import.UPLOAD_TOKEN_TTL.total_seconds() // 60
+            ),
+            "singleUse": True,
+            "accepts": [".xlsx", ".csv"],
+            "maxRows": blind_import.MAX_DATA_ROWS,
+            "maxMegabytes": blind_import.MAX_UPLOAD_BYTES // (1024 * 1024),
+            "nextStep": (
+                "Ask the therapist to open this link and upload the file, then "
+                "call get_import_preview with this batchId. Do not ask for the "
+                "spreadsheet's contents in chat."
+            ),
+        }
+    finally:
+        db.close()
+
+
+@tool()
+def get_import_preview(batch_id: int) -> dict:
+    """
+    What the uploaded file LOOKS like, with none of it quoted.
+
+    Every cell comes back as a SHAPE, not a value: letters become X or x with
+    the case preserved, digits become #, and punctuation and spacing survive.
+    So a surname column reads "Xxxxxxx", a birthday column reads "##/##/####",
+    and a "Last, First" column reads "Xxxxxxx, Xxxxx" -- which is everything you
+    need to work out what a column is, and nothing about any child.
+
+    Per sheet you get: its dimensions, the rows that look like header rows (with
+    their header TEXT, which is the one thing shown verbatim, because column
+    names are what a mapping is made of), and per column a summary of
+    non-empty count, distinct-value COUNT and the three commonest shapes.
+
+    A sheet with no detectable header row reports its columns by letter with no
+    header text at all. That is deliberate: row 1 of a header-less caseload
+    export is a child, not a heading.
+
+    Read the shapes, propose a mapping to the therapist in plain language
+    ("column C looks like dates -- is that the IEP date or the annual review?"),
+    and then call set_import_mapping.
+    """
+    db = _session()
+    try:
+        ctx = _ctx()
+        return blind_import.preview(db, _import_batch(db, ctx, batch_id))
+    finally:
+        db.close()
+
+
+@tool()
+def set_import_mapping(batch_id: int, mapping: dict) -> dict:
+    """
+    Record what each column means, and unlock the columns that are safe to read.
+
+    `mapping` is an object:
+
+      sheet             the sheet name from get_import_preview
+      header_row        1-based row number of the headings (optional)
+      data_start_row    1-based row the students start on (defaults to
+                        header_row + 1)
+      columns           {"A": "last_name", "B": "first_name", "C": "ignore", ...}
+      value_overrides   optional, see below
+
+    Field names: first_name, last_name, full_name_last_first,
+    full_name_first_last, date_of_birth, uic, school, teacher, case_manager,
+    grade_level, enrollment_status, iep_date, annual_review_due_date,
+    reevaluation_due_date, eligibility, notes, ignore.
+
+    Name the student EITHER as first_name + last_name OR as one full_name_*
+    column. Mapping a column to "ignore" is a real answer and better than
+    leaving it out.
+
+    WHAT COMES BACK: the stored mapping plus, for the first time, real sample
+    values -- but only from columns mapped to school, teacher, case_manager,
+    grade_level, enrollment_status, iep_date, annual_review_due_date,
+    reevaluation_due_date or eligibility. Those name a building, an adult, a
+    grade or a compliance date. Columns mapped to a name, a date of birth, a
+    UIC or notes stay masked forever; asking again will not change that.
+
+    `value_overrides` is how you fix an unknown school or teacher after
+    validate_import reports one:
+
+      {"school": {"Nrthgate El": "Northgate Elementary"}}
+
+    Call list_schools and list_teachers to get the existing spellings. This
+    import NEVER creates a school or a teacher -- a fuzzy match is a suggestion,
+    not a licence to add a second Northgate Elementary.
+
+    Re-call this as often as you need; it replaces the whole mapping.
+    """
+    db = _session()
+    try:
+        ctx = _ctx()
+        batch = _import_batch(db, ctx, batch_id)
+        return blind_import.set_mapping(db, batch, mapping, _alias_contexts())
+    finally:
+        db.close()
+
+
+@tool()
+def validate_import(batch_id: int) -> dict:
+    """
+    Check every row against the mapping and report the problems BY ROW NUMBER.
+
+    What you get is a row number, a column letter and a kind of problem. You do
+    NOT get the value that caused it, unless that value is one this server is
+    allowed to show you:
+
+      unparseable_date        row + column + the value's SHAPE
+      missing_required        row + which field is missing
+      duplicate_uic_in_file   the PAIR of row numbers, never the identifier
+      duplicate_uic_existing  row + the existing student's ALIAS
+      unknown_school          row + column + the value + the closest existing
+      unknown_teacher         match, because school and teacher values are
+      unknown_case_manager    yours to reconcile
+      unknown_eligibility     row + column + the value (warning only)
+
+    BLOCKING: missing names, unknown school / teacher / case_manager, and both
+    duplicate-UIC kinds. Everything else is a warning -- an unparseable date is
+    simply left empty on the student.
+
+    Resolve unknown schools and teachers with `value_overrides` in
+    set_import_mapping, then call this again. `unresolvedValues` groups them for
+    you: one entry per distinct spelling, with the rows it appears on.
+
+    Report the counts to the therapist in plain language. She is the one who
+    knows whether "Bldg 4" is Northgate.
+    """
+    db = _session()
+    try:
+        ctx = _ctx()
+        return blind_import.validate(db, _import_batch(db, ctx, batch_id))
+    finally:
+        db.close()
+
+
+@tool()
+def commit_import(batch_id: int, confirm: bool = False) -> dict:
+    """
+    WRITE. Creates the students, all of them or none of them, and puts them on
+    the calling therapist's caseload.
+
+    The real names, dates of birth and identifiers are read from the staged file
+    on the server. They are not passed in and they are not returned: what comes
+    back is a count and a list of ALIASES (student_41, student_42...), which is
+    the identity every other tool here uses. If the therapist wants to see who
+    is who, she looks in the SLP Pro app.
+
+    `confirm` must be literally true. Without it nothing is written and you get
+    a summary of what would be -- how many students, from which rows, which
+    fields will be filled. Show that to the therapist and get an answer before
+    sending confirm=true.
+
+    Refuses outright while validate_import reports blocking issues, and
+    re-validates before writing regardless of what the batch's status says.
+
+    All-or-nothing: if any row fails, every student this call created is removed
+    again before the error comes back.
+
+    Not written even when mapped: `notes` and `eligibility`. Everything else on
+    the field list is.
+    """
+    db = _session()
+    try:
+        ctx = _ctx()
+        batch = _import_batch(db, ctx, batch_id)
+        return blind_import.commit(db, batch, ctx.user_id, confirm)
+    finally:
+        db.close()
+
+
+@tool()
+def discard_import(batch_id: int, confirm: bool = False) -> dict:
+    """
+    WRITE - DESTRUCTIVE, AND DESTRUCTION IS THE POINT. Deletes the import batch
+    and every staged row of the uploaded spreadsheet.
+
+    Those rows are the only verbatim copy of the therapist's roster export on
+    this server -- real names, real birthdays, real identifiers, sitting in a
+    table nothing else reads. Discarding is how she gets rid of it the moment
+    the import is done, rather than waiting for a retention policy. OFFER THIS
+    after a successful commit_import.
+
+    Students already created by commit_import are NOT touched. They are ordinary
+    caseload records now and this does not reach them.
+
+    `confirm` must be literally true. Without it nothing is deleted and you get
+    a count of what would go.
+    """
+    db = _session()
+    try:
+        ctx = _ctx()
+        batch = _import_batch(db, ctx, batch_id)
+        return blind_import.discard(db, batch, confirm)
     finally:
         db.close()
 

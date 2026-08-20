@@ -36,6 +36,11 @@ from app.models.teacher_role import TeacherRole  # noqa: F401
 
 from app.models.api_token import ApiToken  # noqa: F401
 
+# Staged caseload imports. `import_rows.cells_json` holds raw spreadsheet
+# values and is the one table in this app deliberately walled off from the MCP
+# surface — see app/models/import_batch.py.
+from app.models.import_batch import ImportBatch, ImportRow  # noqa: F401
+
 # The OAuth facade's own tables. Imported after ApiToken because api_tokens
 # carries the (later-added) FK columns that point back at these.
 from app.models.oauth_client import OAuthClient  # noqa: F401

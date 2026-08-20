@@ -299,7 +299,7 @@ more reliable path if you hit it.
 
 ## Tool reference
 
-25 tools total, grouped as the server itself groups them. Full parameter
+31 tools total, grouped as the server itself groups them. Full parameter
 lists and semantics live in each tool's docstring in `server.py` — this is
 an index, not a spec.
 
@@ -318,6 +318,12 @@ an index, not a spec.
 **Write — destructive (`confirm=True` required)**
 `delete_progress_entry`, `delete_goal` (cascades: every objective and
 progress entry under the goal goes with it).
+
+**Staged import** (see [Blind staged import](#blind-staged-import))
+`create_import_upload`, `get_import_preview`, `set_import_mapping`,
+`validate_import`, `commit_import` (`confirm=True`), `discard_import`
+(`confirm=True`; destroys the staged copy of the spreadsheet, which is the
+point of it).
 
 ## PII filtering
 
@@ -463,11 +469,214 @@ utility is not silently traded away, and unit tests of the sanitizer itself
 3. If the tool composes its own student-facing payload, use `_student_label()`
    or `_student_identity()` rather than emitting a name and relying on the
    sanitizer to take it back out.
-4. Run:
+4. If the tool reads anything a user uploaded rather than anything this app
+   created, the roster scrubber cannot help you — it redacts against students
+   that already exist. Mask it (`privacy.mask_value`) and reveal only through
+   an explicit allow-list. See [Blind staged import](#blind-staged-import).
+5. Run:
    ```
    backend/venv/Scripts/python.exe -m pytest backend/tests -q
    backend/venv/Scripts/python.exe -m ruff check backend
    ```
+
+## Blind staged import
+
+`app/services/blind_import.py`, `app/routers/import_upload.py`,
+`app/models/import_batch.py`, and the masking half of `app/mcp/privacy.py`.
+
+An AI-orchestrated caseload import from a spreadsheet of **any** layout, where
+the model never reads the spreadsheet. The rigid CSV importer
+(`app/services/csv_import_service.py`) handles exactly one column layout;
+working out what the *other* layouts mean is exactly what a language model is
+good at — and the file is a list of children's names, birthdays and state
+identifiers, which is exactly what a language model must not be given.
+
+### The flow
+
+| Step | Where the data is | What crosses `/mcp` |
+| --- | --- | --- |
+| `create_import_upload()` | nowhere yet | a one-shot URL, a batch id |
+| therapist uploads in her browser | `import_rows.cells_json` | **nothing** |
+| `get_import_preview(batch_id)` | server | shapes, counts, header text |
+| `set_import_mapping(batch_id, mapping)` | server | the mapping + allow-listed sample values |
+| `validate_import(batch_id)` | server | row numbers, shapes, school/teacher values, aliases |
+| `commit_import(batch_id, confirm)` | `students` | a count and aliases |
+| `discard_import(batch_id, confirm)` | destroyed | a count |
+
+The upload route is registered in `main.py` **before** the `/api` routers, for
+the same reason as the OAuth facade: its paths live outside `/api` (a human
+reads the URL off a screen) and nothing later may claim them. It is
+`include_in_schema=False`.
+
+### The upload token
+
+Same scheme as an API key, with two differences.
+
+```
+secret   "slpu_" + secrets.token_hex(20)      -> 45 characters
+stored   sha256(secret).hexdigest()           -> 64 hex, UNIQUE, NULLABLE
+ttl      30 minutes  (blind_import.UPLOAD_TOKEN_TTL)
+uses     exactly one
+```
+
+The `slpu_` prefix is deliberately not `slp_`: these two credentials open
+completely different doors, and a door that can tell them apart on the first
+five characters cannot be talked into accepting the wrong one.
+
+**Single use is enforced by the batch's `status`, not by clearing the digest at
+upload time.** Clearing it would make a second POST indistinguishable from a
+forged token — both "unknown link" — when what actually happened is "you
+already uploaded this file", which is worth saying to the therapist standing in
+front of it. The token only opens a batch that is still `pending_upload`, so it
+is dead the moment rows land. The digest is cleared when the batch reaches a
+terminal state (`commit_import` nulls it), so a finished batch carries no live
+credential.
+
+A parse failure deliberately does **not** spend the token: the link stays usable
+for the corrected file.
+
+### Masking: shapes, not values
+
+`app/mcp/privacy.py`:
+
+```python
+mask_value("Ramirez, Sofia")  ->  "Xxxxxxx, Xxxxx"
+mask_value("3/17/2011")       ->  "#/##/####"
+mask_value("")                ->  None
+```
+
+Letters become `X`/`x` with case preserved (because `Last, First` and
+`LAST, FIRST` are different export conventions and the agent has to tell them
+apart), digits become `#`, punctuation and spacing survive, and shapes longer
+than `SHAPE_MAX_LENGTH` (24) are truncated. One-way and many-to-one: two
+children with same-length names produce one shape.
+
+`summarize_column` reports the header, the non-empty count, the **count** of
+distinct values (never the values), and the three commonest shapes with
+frequencies.
+
+Everything above this feature protects students the app **already knows** — the
+free-text scrubber recognises a name because that name is on the roster it was
+built from. A caseload arriving in a spreadsheet is precisely the case that
+defends against nothing: not one of those children exists yet. So the import
+surface inverts the default from "show it unless we recognise it as PII" to
+"show the shape, always, and reveal a value only where a human has said what
+the column means AND the meaning is on a short allow-list".
+
+### `SAFE_REVEAL_FIELDS` and the mapping gate
+
+```python
+SAFE_REVEAL_FIELDS = {
+    "school", "teacher", "case_manager", "grade_level", "enrollment_status",
+    "iep_date", "annual_review_due_date", "reevaluation_due_date", "eligibility",
+}
+NEVER_REVEAL_FIELDS = {
+    "first_name", "last_name", "full_name_last_first", "full_name_first_last",
+    "date_of_birth", "uic", "notes", "ignore",
+}
+```
+
+Two gates in order, and the ordering is the whole privacy argument:
+
+1. **A mapping exists.** Before it does, no column can be shown — "the column
+   of Capitalised Words" is as likely to be surnames as buildings.
+2. **The field is allow-listed.** Every entry in `SAFE_REVEAL_FIELDS` names an
+   *institution* (a building, an adult, a grade, a compliance date, a state
+   eligibility category), never a child.
+
+`NEVER_REVEAL_FIELDS` is checked **independently**, not as the complement of the
+allow-list, so a field added to `IMPORT_FIELDS` and forgotten here is invisible
+by default rather than public by default. `notes` is on it because its content
+is unbounded by definition — a "comments" column in a district export is where a
+diagnosis or a parent's phone number ends up.
+
+Every revealed value additionally passes `scrub_text` against the live roster
+(`reveal_samples`), so an existing student's name inside a school cell comes back
+as that student's alias. That is the gate the allow-list cannot provide.
+
+**The honest limit.** A mapping can lie: call the surname column `school` and
+the reveal honestly shows the surname column. What stops it being a back door is
+that every one of those "schools" is then unknown, `validate_import` blocks the
+batch, and `commit_import` refuses. The allow-list defends against a mistake;
+the unknown-value block defends against a deliberate one. Both are asserted in
+`test_mislabelling_the_name_column_as_a_school_is_caught_by_validation`.
+
+### Header text: the one verbatim reveal, and its four gates
+
+A mapping cannot be proposed without column names, so header text is shown. The
+danger is a file with **no header row at all**, whose first row is a child and
+which passes every "looks like words" heuristic ever written.
+`privacy.header_reveal_rows` is the entire policy:
+
+1. `is_header_row` — the row is mostly non-numeric words. (Cheap first pass;
+   being wrong here costs nothing.)
+2. `looks_like_label` on **every** populated cell — at most 40 characters, more
+   letters than digits, no four-digit run, no date-shaped run. This alone
+   rejects any row carrying a birthday, a year or a UIC.
+3. `_differs_from_the_column` — the row's cell shapes differ from the modal
+   shape of their own column *below* it. A heading does not look like its
+   column; a first data row **is** one. This is the gate that catches the
+   header-less file.
+4. At least two populated cells, so a merged banner — the cell most likely to
+   read "Speech caseload for Jane Ramirez" — is never printed.
+
+Then a hard stop: the scan runs top-down and **ends** at the first qualifying
+row spanning ≥ 80% of the sheet's width. That row is the header; nothing below
+it is ever considered, however heading-like. There is no parameter that lets a
+caller ask for a different row's text — that would be an exfiltration oracle.
+
+A sheet with no qualifying row reports `header: null` on every column and is
+mapped by letter alone.
+
+### `cells_json` is the wall
+
+`import_rows.cells_json` is the uploaded spreadsheet verbatim and is the one
+column in the schema deliberately walled off from `/mcp`. Three independent
+layers:
+
+- no tool returns it;
+- `_ALWAYS_REMOVED_KEYS` in `app/mcp/privacy.py` drops `cells`, `cellsjson`,
+  `rawcells`, `rawrow`, `rowcells` and `cellvalues` structurally, at any depth;
+- `DENYLISTED_KEYS` in `test_mcp_pii.py` and
+  `test_the_raw_cells_never_appear_in_any_import_tool_output` assert the absence
+  rather than trusting it.
+
+The filename is also never returned. "Ramirez caseload.xlsx" is a name.
+
+### Deliberate limits
+
+- **An unknown school or teacher is blocking and is never invented.** The rigid
+  CSV importer creates a school it has not heard of, which is how a district
+  ends up with "Northgate El", "Northgate Elem." and "Northgate Elementary" as
+  three buildings. Here the agent reconciles the spelling — which it can,
+  because school and teacher are on the reveal allow-list — using
+  `value_overrides` in the mapping. `value_overrides` accepts only `school`,
+  `teacher` and `case_manager`: the fields whose values the agent is allowed to
+  see are exactly the fields it is allowed to correct.
+- **`eligibility` and `notes` are mappable and validated but not written.**
+  Student creation goes through `StudentRepository.create_student` and nothing
+  else; writing eligibility links would be a second write path.
+- **Commit is all-or-nothing, by compensation rather than by one transaction.**
+  `create_student` commits per student (it is the same call the REST route and
+  the CSV importer make, and there is no import-only write path). So if a row
+  fails, `_undo` deletes every student and grant this call created before the
+  error is re-raised. That is safe precisely because the rows are seconds old
+  and nothing references them yet. Chosen over `join_transaction_mode=
+  "create_savepoint"` because SAVEPOINT under pysqlite is unreliable and this
+  path has to be verifiable on sqlite.
+- **Batches are personal, with no admin override.** A half-finished import full
+  of somebody's raw roster answers no administrative question. Another user's
+  batch id is "not found".
+
+### Limits and shapes handled
+
+5 MB, 5,000 data rows, `.xlsx` and `.csv` only (`.xls` gets its own message).
+Every sheet in a workbook is read. `data_only=True` means a formula yields its
+cached **value**, never its text — `=CONCATENATE(B2," ",A2)` names a child as
+surely as the cell it computes. `read_only=True` means a merged range reads as
+its value in the top-left and `None` elsewhere. Blank rows are skipped but row
+indices stay the spreadsheet's own, so a reported issue points at the row the
+therapist can see on her screen.
 
 ---
 
