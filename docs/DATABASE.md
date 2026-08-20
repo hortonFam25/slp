@@ -126,10 +126,12 @@ $env:AUTH_REQUIRE_BEARER = "false"
 python backend/start_server.py
 ```
 
-The models carry `server_default=GETDATE()` on ~60 columns, which sqlite does
-not have. `seed_dev.py` (and `backend/tests/conftest.py`) install a
-sqlite-only statement shim that rewrites it to `CURRENT_TIMESTAMP`. It is
-scoped to the sqlite dialect; nothing else in the app's SQL is touched.
+Timestamp columns use `server_default=func.now()`, which SQLAlchemy renders per
+dialect (`CURRENT_TIMESTAMP` on both sqlite and SQL Server). Nothing needs a
+shim. They used to hard-code the SQL-Server-only `GETDATE()`, which made
+`create_all` on sqlite die with ``near "(": syntax error`` until both
+`seed_dev.py` and `backend/tests/conftest.py` rewrote it in flight; those hooks
+are gone.
 
 ---
 
@@ -242,9 +244,15 @@ alembic -c alembic.ini revision --autogenerate -m "what it does"
 ```
 
 Read the generated script. Autogenerate against sqlite will not get SQL Server
-right on its own — check types, server defaults (`GETDATE()`), and that
-constraint changes are wrapped in `batch_alter_table` the way
+right on its own — check types, server defaults, and that constraint changes
+are wrapped in `batch_alter_table` the way
 `c5a91b3e77d4_add_oauth_facade_tables.py` does.
+
+One known false positive: with `compare_server_default=True`, autogenerate may
+report a diff on timestamp columns deployed before the `func.now()` change,
+whose stored default is still literally `GETDATE()`. `CURRENT_TIMESTAMP` and
+`GETDATE()` are equivalent in T-SQL, so those are cosmetic — drop them from the
+script rather than applying them.
 
 ### 2. Rehearse on dev
 
