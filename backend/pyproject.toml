@@ -54,6 +54,7 @@ build-backend = "poetry.core.masonry.api"
 #   F63  comparisons that are always wrong (`is` on a literal, `==` on a tuple)
 #   F7   misplaced statements (`break` outside a loop, `return` outside a def)
 #   F82  undefined names — the typo-that-becomes-a-500 rule
+#   T20  print()/pprint() left in the application package — see below
 #
 # Everything else (unused imports, import order, line length, naming) is
 # currently NOT enforced.
@@ -82,7 +83,19 @@ extend-exclude = [
 ]
 
 [tool.ruff.lint]
-select = ["E9", "F63", "F7", "F82"]
+select = ["E9", "F63", "F7", "F82", "T20"]
+
+# T20 (flake8-print) is scoped to `app/` by the per-file-ignores below. The
+# application package writes to a logger; `scripts/`, `tests/` and the
+# repo-root helpers are console programs where print() is the output, so the
+# rule is switched back off for them.
+#
+# Why the rule and not just a one-off sweep: app/ carried 77 print() calls, two
+# of which (appointment_repository.py, the "Backend debug" pair) emitted emoji.
+# Under gunicorn on App Service stdout is cp1252, so those raised
+# UnicodeEncodeError from inside the request handler and turned
+# POST /api/scheduling/appointments into a 500. A print() in this package is a
+# latent 500, which is why CI now refuses one.
 
 # One pre-existing F821 hit, quarantined per-file so the rule stays live for
 # the other ~200 modules instead of being switched off wholesale. It is real and
@@ -101,3 +114,11 @@ select = ["E9", "F63", "F7", "F82"]
 # green, and tests/test_time_block_repository.py keeps it that way.
 [tool.ruff.lint.per-file-ignores]
 "app/repositories/therapy_session_repository.py" = ["F821"]
+
+# print() is the intended output of these — they are run by a human at a shell
+# or by a CI step, not inside a request.
+"scripts/**" = ["T20"]
+"tests/**" = ["T20"]
+"main.py" = ["T20"]
+"start_server.py" = ["T20"]
+"app/alembic/env.py" = ["T20"]

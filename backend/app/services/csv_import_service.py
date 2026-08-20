@@ -1,3 +1,4 @@
+import logging
 from typing import List, Dict, Any, Tuple, Optional
 from sqlalchemy.orm import Session
 from datetime import date
@@ -8,6 +9,8 @@ from app.repositories.student_repository import StudentRepository
 from app.repositories.school_repository import SchoolRepository
 from app.schemas.csv_import import StudentCSVRow, CSVImportResult, parse_csv_content
 from app.schemas.student import StudentCreate
+
+logger = logging.getLogger(__name__)
 
 
 class CSVImportService:
@@ -274,7 +277,7 @@ class CSVImportService:
             return new_school.id
         except Exception as e:
             # If we can't create the school, just return None and log the issue
-            print(f"Warning: Could not create school '{clean_name}': {e}")
+            logger.warning("Could not create school %r: %s", clean_name, e)
             return None
     
     def _create_new_student(self, student_data: StudentCSVRow, school_name: str = None) -> Student:

@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime, date, timedelta
 from typing import List, Optional, Dict, Any
 from sqlalchemy.orm import Session
@@ -12,6 +13,8 @@ from app.models.block_assignment import BlockAssignment
 from app.models.goal_objective import GoalObjective
 from app.repositories.appointment_repository import AppointmentRepository
 from app.schemas.appointment import AppointmentCreate, PlannedGoal, PlannedObjective
+
+logger = logging.getLogger(__name__)
 
 
 class TimeBlockSchedulingService:
@@ -36,11 +39,14 @@ class TimeBlockSchedulingService:
         Returns:
             Dict with created appointments, conflicts, and summary
         """
-        print(f"🔍 Time Block Scheduling Service - Received student_goal_assignments: {student_goal_assignments}")
-        print(f"🔍 Time Block Scheduling Service - Type: {type(student_goal_assignments)}")
+        logger.debug(
+            "Received student_goal_assignments (%s): %s",
+            type(student_goal_assignments).__name__,
+            student_goal_assignments,
+        )
         if student_goal_assignments:
             for student_id, assignments in student_goal_assignments.items():
-                print(f"  Student {student_id}: {assignments}")
+                logger.debug("  Student %s: %s", student_id, assignments)
         # Get the time block with assignments
         time_block = self.db.query(TimeBlock).filter(
             TimeBlock.id == time_block_id
@@ -103,7 +109,12 @@ class TimeBlockSchedulingService:
                     goal_ids = student_goal_assignments[student_id_str].get('goals', [])
                     objective_ids = student_goal_assignments[student_id_str].get('objectives', [])
                     
-                    print(f"🎯 Found goal assignments for student {student_id}: goals={goal_ids}, objectives={objective_ids}")
+                    logger.debug(
+                        "Found goal assignments for student %s: goals=%s, objectives=%s",
+                        student_id,
+                        goal_ids,
+                        objective_ids,
+                    )
                     
                     # Convert goal IDs to PlannedGoal objects
                     for goal_id in goal_ids:
@@ -127,7 +138,11 @@ class TimeBlockSchedulingService:
                                 priority=1
                             ))
                 else:
-                    print(f"🚫 No goal assignments found for student {student_id} (looking for key '{student_id_str}')")
+                    logger.debug(
+                        "No goal assignments found for student %s (looking for key %r)",
+                        student_id,
+                        student_id_str,
+                    )
                 
                 # Create appointment data
                 appointment_data = AppointmentCreate(

@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime, date, timedelta
 from typing import List, Optional
 from sqlalchemy.orm import Session, joinedload
@@ -7,6 +8,8 @@ from app.models.student import Student
 from app.models.teacher import Teacher
 from app.models.school import School
 from app.schemas.appointment import AppointmentCreate, AppointmentUpdate, RecurringAppointmentCreate
+
+logger = logging.getLogger(__name__)
 
 
 class AppointmentRepository:
@@ -23,8 +26,11 @@ class AppointmentRepository:
         planned_goals = appointment_data.planned_goals
         planned_objectives = appointment_data.planned_objectives
         
-        print(f"🎯 Backend debug - planned_goals: {planned_goals}")
-        print(f"📋 Backend debug - planned_objectives: {planned_objectives}")
+        logger.debug(
+            "create_appointment: %d planned goals, %d planned objectives",
+            len(planned_goals or []),
+            len(planned_objectives or []),
+        )
         
         # Create appointment (exclude the planning fields)
         appointment_dict = appointment_data.dict(exclude={'planned_goals', 'planned_objectives'})
@@ -50,9 +56,12 @@ class AppointmentRepository:
         
         # Add planned goals if provided
         if planned_goals:
-            print(f"🎯 Creating {len(planned_goals)} session goals for therapy_session_id={therapy_session.id}")
-            for i, goal_data in enumerate(planned_goals):
-                print(f"  Goal {i+1}: goal_id={goal_data.goal_id}, planned={goal_data.planned}")
+            logger.debug(
+                "Creating %d session goals for therapy_session_id=%s",
+                len(planned_goals),
+                therapy_session.id,
+            )
+            for goal_data in planned_goals:
                 session_goal = SessionGoal(
                     therapy_session_id=therapy_session.id,
                     goal_id=goal_data.goal_id,
@@ -62,13 +71,16 @@ class AppointmentRepository:
                 )
                 self.db.add(session_goal)
         else:
-            print("🎯 No planned goals - therapy session created without goals")
+            logger.debug("No planned goals - therapy session created without goals")
         
         # Add planned objectives if provided
         if planned_objectives:
-            print(f"📋 Creating {len(planned_objectives)} session objectives for therapy_session_id={therapy_session.id}")
-            for i, objective_data in enumerate(planned_objectives):
-                print(f"  Objective {i+1}: objective_id={objective_data.objective_id}, goal_id={objective_data.goal_id}, planned={objective_data.planned}")
+            logger.debug(
+                "Creating %d session objectives for therapy_session_id=%s",
+                len(planned_objectives),
+                therapy_session.id,
+            )
+            for objective_data in planned_objectives:
                 session_objective = SessionObjective(
                     therapy_session_id=therapy_session.id,
                     objective_id=objective_data.objective_id,
@@ -80,7 +92,7 @@ class AppointmentRepository:
                 )
                 self.db.add(session_objective)
         else:
-            print("📋 No planned objectives - therapy session created without objectives")
+            logger.debug("No planned objectives - therapy session created without objectives")
         
         self.db.commit()
         self.db.refresh(appointment)
@@ -345,8 +357,12 @@ class AppointmentRepository:
         planned_goals = appointment_data.planned_goals
         planned_objectives = appointment_data.planned_objectives
         
-        print(f"🔄 Update appointment {appointment_id} - planned_goals: {planned_goals}")
-        print(f"🔄 Update appointment {appointment_id} - planned_objectives: {planned_objectives}")
+        logger.debug(
+            "update_appointment %s: %d planned goals, %d planned objectives",
+            appointment_id,
+            len(planned_goals or []),
+            len(planned_objectives or []),
+        )
         
         # Update appointment fields (exclude the planning fields)
         update_dict = appointment_data.dict(exclude={'planned_goals', 'planned_objectives'}, exclude_unset=True)
@@ -454,7 +470,7 @@ class AppointmentRepository:
         if not appointment.therapy_session and appointment.start_datetime < now:
             raise ValueError(f"Cannot delete appointment {appointment_id}: appointment is in the past")
         
-        print(f"🗑️ Deleting appointment {appointment_id} and associated therapy data")
+        logger.info("Deleting appointment %s and associated therapy data", appointment_id)
         
         # Get the associated therapy session
         therapy_session = self.db.query(TherapySession).filter(
@@ -471,17 +487,21 @@ class AppointmentRepository:
                 SessionObjective.therapy_session_id == therapy_session.id
             ).delete(synchronize_session=False)
             
-            print(f"🗑️ Deleted {deleted_goals} session goals and {deleted_objectives} session objectives")
+            logger.info(
+                "Deleted %d session goals and %d session objectives",
+                deleted_goals,
+                deleted_objectives,
+            )
             
             # Delete the therapy session
             self.db.delete(therapy_session)
-            print(f"🗑️ Deleted therapy session {therapy_session.id}")
+            logger.info("Deleted therapy session %s", therapy_session.id)
         
         # Delete the appointment
         self.db.delete(appointment)
         self.db.commit()
         
-        print(f"✅ Successfully deleted appointment {appointment_id}")
+        logger.info("Successfully deleted appointment %s", appointment_id)
         return True
 
     def get_appointments_by_date_range(
@@ -851,10 +871,16 @@ class AppointmentRepository:
                 offset_delta = timedelta(days=pattern_data.date_offset_days)
                 offset_date = appointment.start_datetime.date() + offset_delta
                 
-                print(f"🔍 Appointment {appointment.id} day_alignment:")
-                print(f"  Original: {appointment.start_datetime.date()} (weekday {appointment.start_datetime.weekday()})")
-                print(f"  Offset: {pattern_data.date_offset_days} days")
-                print(f"  After offset: {offset_date} (weekday {offset_date.weekday()})")
+                logger.debug(
+                    "Appointment %s day_alignment: original %s (weekday %d), offset %s days, "
+                    "after offset %s (weekday %d)",
+                    appointment.id,
+                    appointment.start_datetime.date(),
+                    appointment.start_datetime.weekday(),
+                    pattern_data.date_offset_days,
+                    offset_date,
+                    offset_date.weekday(),
+                )
                 
                 # Find next occurrence of target day of week
                 current_day = offset_date.weekday()  # Monday = 0
@@ -866,7 +892,7 @@ class AppointmentRepository:
                 else:  # Monday=1 becomes 0, Tuesday=2 becomes 1, etc.
                     target_day = target_day_raw - 1
                 
-                print(f"  Target day raw: {target_day_raw}, converted: {target_day}")
+                logger.debug("Target day raw: %s, converted: %s", target_day_raw, target_day)
                 
                 days_to_add = (target_day - current_day) % 7
                 if days_to_add == 0 and current_day != target_day:
@@ -874,8 +900,12 @@ class AppointmentRepository:
                 
                 aligned_date = offset_date + timedelta(days=days_to_add)
                 
-                print(f"  Days to add: {days_to_add}")
-                print(f"  Final aligned date: {aligned_date} (weekday {aligned_date.weekday()})")
+                logger.debug(
+                    "Days to add: %d, final aligned date: %s (weekday %d)",
+                    days_to_add,
+                    aligned_date,
+                    aligned_date.weekday(),
+                )
                 
                 # Apply new times
                 if pattern_data.start_datetime and pattern_data.end_datetime:
@@ -890,7 +920,7 @@ class AppointmentRepository:
                     new_start = datetime.combine(aligned_date, original_time)
                     new_end = new_start + duration
                 
-                print(f"  Final appointment times: {new_start} → {new_end}")
+                logger.debug("Final appointment times: %s to %s", new_start, new_end)
             else:
                 # Default case: treat as time_only update (preserve existing behavior)
                 if pattern_data.start_datetime and pattern_data.end_datetime:
@@ -907,7 +937,12 @@ class AppointmentRepository:
                     new_end = appointment.end_datetime
             
             # Update appointment
-            print(f"🔄 Updating appointment {appointment.id}: {appointment.start_datetime} → {new_start}")
+            logger.debug(
+                "Updating appointment %s: %s to %s",
+                appointment.id,
+                appointment.start_datetime,
+                new_start,
+            )
             appointment.start_datetime = new_start
             appointment.end_datetime = new_end
             
