@@ -204,7 +204,7 @@ needed no new code path to accept it.
 Every tool in `server.py` follows the same shape. To add one:
 
 ```python
-@mcp_server.tool()
+@tool()                           # NOT @mcp_server.tool() - see "PII filtering"
 def my_new_tool(some_id: int, note: Optional[str] = None) -> dict:
     """
     One line an agent that's never seen this app can act on: what comes
@@ -247,6 +247,13 @@ Rules that keep this consistent with every other tool:
 6. Update `SERVER_INSTRUCTIONS` at the top of `server.py` if the new tool
    changes the recommended starting point or the id hierarchy an agent
    should assume.
+7. **Register with `@tool()`, never `@mcp_server.tool()`.** `@tool()` is the
+   project-local decorator defined near the top of `server.py`; it registers
+   with FastMCP *and* wraps the function in the PII filter.
+   `backend/tests/test_mcp_pii.py` fails the build if any registered tool is
+   missing the filter's marker.
+8. **Add an `ARG_FACTORY` entry** in `backend/tests/test_mcp_pii.py` and run
+   `pytest backend/tests`. See the checklist under "PII filtering" below.
 
 ---
 
@@ -311,6 +318,158 @@ an index, not a spec.
 **Write — destructive (`confirm=True` required)**
 `delete_progress_entry`, `delete_goal` (cascades: every objective and
 progress entry under the goal goes with it).
+
+## PII filtering
+
+`/mcp` is an AI-facing door. What comes back through it is handed to a model,
+may be quoted into a transcript, and may be retained by a vendor the district
+never signed a DPA with. That is a different risk from the REST API, where the
+reader is the therapist herself, sitting in front of the app that owns the
+record — so the rule here is stricter than `app/routers/students.py` and has
+**no owner exception**. `_should_mask_student_names()` shows real names to the
+therapist who owns the caseload and masks only for admins and impersonators;
+over MCP *every* caller is masked, including the owner, because the caller is
+never really the therapist — it is a model acting on her behalf.
+
+**Students are identified by alias, never by name.** `student_12`. The scheme
+is the org's existing one (`app/ai/privacy.py`'s `build_student_alias`,
+mirrored by `Student.alias`), so an alias an agent sees over MCP is the same
+string the in-app AI chat uses and the same string `hydrate_aliases_for_ui`
+turns back into a name *inside the app*, where that is allowed.
+
+### The policy
+
+Implemented in `backend/app/mcp/privacy.py`. Applied to every result and every
+error of every tool.
+
+**Removed, or replaced by the alias**
+
+| What | How |
+| --- | --- |
+| `first`, `last`, and any camelCase/snake_case spelling | replaced by the alias when the surrounding object identifies its student (a sibling `studentId` / `student_alias` / `alias`), dropped otherwise |
+| `student`, `student_name` / `studentName`, `studentFullName`, `studentDisplayName`, `studentFirstName`, `studentLastName` | same rule |
+| `date_of_birth` / `dateOfBirth` / `dob` / `birthDate` | dropped outright — there is no useful aliased form of a DOB |
+| `uic` (the state identifier) | dropped outright |
+| **any student's first, last or full name appearing in ANY string, at any depth** | replaced by that student's alias |
+
+A name field that cannot be attributed to a student is **dropped**, not kept —
+an unattributable name is the worst case, not the harmless one.
+
+That last table row is the one structure cannot reach: a name composed into a
+progress comment, a session note, an objective description, or an error
+message. It runs against **every** student in the database, not only the
+caller's caseload — the names most worth catching are exactly the ones
+belonging to students the caller may *not* see, e.g. a peer named inside an
+accessible student's group-session note ("worked in a pair with Jane Doe").
+Scoping the scrubber to `allowed_student_ids` would let that through by
+construction.
+
+**Kept — the clinical function has to survive**
+
+Student `id` and `alias`, grade level, enrollment status, archived flag, all
+six IEP dates, school / teacher / case-manager references and their ids,
+eligibility categories, goal and objective text, progress entries, and all
+therapy-session data.
+
+### Policy constants
+
+Both at the top of `backend/app/mcp/privacy.py`:
+
+- **`REDACT_STAFF_NAMES = False`** — v1 does **not** strip teacher, case
+  manager, school-contact or principal names. A teacher's name is
+  *organisational* context (which adult owns this IEP, which classroom, which
+  building), not student PII, and stripping it would make the schedule and the
+  case-manager fields useless to an agent without protecting a student. If a
+  district's DPA says otherwise this is a **one-line change** to `True`, which
+  folds `_STAFF_NAME_KEYS` into the deny list;
+  `test_staff_names_are_kept_in_v1` is the test that tells you the policy moved
+  rather than something breaking by accident.
+- **`MIN_REDACTABLE_NAME_LENGTH = 2`** — names shorter than this are not
+  redacted from free text. Redaction also uses `\b` word boundaries, so a short
+  surname cannot rewrite the middle of an unrelated word.
+
+### How enforcement works
+
+There is **one choke point**, not per-tool discipline.
+
+`server.py` defines a project-local `@tool()` decorator. It registers with
+FastMCP exactly as `@mcp_server.tool()` did, and additionally wraps the
+function so that:
+
+- its **return value** goes through `sanitize_tool_result()`;
+- any **exception it raises** has its message run through
+  `sanitize_error_message()` before it is re-raised (`from None`, so the
+  original text cannot survive as a `__cause__` some formatter later prints).
+  Error text is a real leak path: a message can compose a name, or — easier to
+  miss — echo an argument the caller supplied, which is how a date parser turns
+  into an exfiltration oracle;
+- the wrapper carries `__pii_filtered__ = True`.
+
+`functools.wraps` preserves the signature and the docstring, so FastMCP builds
+the same schema and description a client saw before, and no tool signature
+changed. The roster the scrubber redacts against is rebuilt per call from a
+short session of its own — the same pattern tool bodies use — and is
+**uncached**: a cached roster is a roster that can be stale, and a stale roster
+is a name that does not get redacted. Failure is **closed** — if the roster
+cannot be built, the exception propagates and the unfiltered result is
+discarded rather than returned unscrubbed.
+
+Two payload shapes are additionally fixed **at the source**, so an agent gets a
+clean object rather than a record with holes where the names used to be. The
+recursive sanitizer still runs over everything afterwards (belt and braces):
+
+- `get_student` / `list_students` / `update_student` emit `alias` and
+  `displayName` instead of `first` / `last` (`_student_identity`);
+- `_AuthShim` — the stand-in `AuthContext` handed to the REST layer's
+  `_build_session_response` / `_build_session_summary`, both of which compose a
+  `student_name` field — always answers "mask", for every caller. `_student_label`
+  likewise returns the alias unconditionally, with no caller branch.
+
+### The drift tests
+
+`backend/tests/test_mcp_pii.py`, run by CI on every PR
+(`.github/workflows/ci.yml`). It is written to fail on the three realistic ways
+this protection rots:
+
+1. **Registry completeness** — walks the *live* FastMCP registry
+   (`registered_tools()`, which exposes `Tool.fn`) and asserts every registered
+   tool carries `__pii_filtered__`. A tool added with the raw
+   `@mcp_server.tool()` fails here.
+2. **ARG_FACTORY completeness** — the same registry walk asserts every
+   registered tool has an entry in the module's `ARG_FACTORY` map (tool name ->
+   callable producing valid args against the seeded data), and that no entry
+   names a tool that no longer exists. A new tool nobody exercises is red CI.
+3. **Every tool, every result** — seeds sqlite with two students carrying
+   unmistakable sentinel PII (`Zebulonqx Vandergriff`, `Quixotellez Marchetti`,
+   `UICSENTINEL123`, sentinel DOBs), one on the test principal's caseload and
+   one deliberately off it, with the off-caseload student's name composed into
+   the on-caseload student's goal and notes — then calls **every** registered
+   tool and asserts over the full serialized JSON of each result: no sentinel
+   substring (case-insensitive) and no denylisted key at any depth.
+
+Plus error-path tests (a name passed as `progress_date`, which the parser
+echoes back verbatim; an access-denied refusal), an alias-presence test so
+utility is not silently traded away, and unit tests of the sanitizer itself
+(recursion, idempotence, short-name safety).
+
+### Checklist: adding a new tool
+
+1. Register it with **`@tool()`** from `app/mcp/server.py` — never
+   `@mcp_server.tool()`.
+2. Add an **`ARG_FACTORY`** entry in `backend/tests/test_mcp_pii.py`, keyed by
+   the tool's name, returning valid kwargs against the seeded data. Write tools
+   may really write (the test DB is a throwaway sqlite file); destructive tools
+   are called with `confirm=False`.
+3. If the tool composes its own student-facing payload, use `_student_label()`
+   or `_student_identity()` rather than emitting a name and relying on the
+   sanitizer to take it back out.
+4. Run:
+   ```
+   backend/venv/Scripts/python.exe -m pytest backend/tests -q
+   backend/venv/Scripts/python.exe -m ruff check backend
+   ```
+
+---
 
 ## Related documentation
 
