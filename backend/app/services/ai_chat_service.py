@@ -37,7 +37,20 @@ class AIChatService:
         self.db.close()
 
     def _get_student_or_raise(self, student_id: int) -> Student:
-        student = self.db.query(Student).filter(Student.id == student_id).first()
+        """The student this chat is about, or a refusal.
+
+        An ARCHIVED student is not found here. This method gates every entry
+        point into the assistant -- creating a session, sending a message,
+        saving a progress note -- and the alias context it builds is what the
+        read tools in `app/ai/tools/read_tools.py` query with. Letting an
+        archived student through would open a chat whose whole context is a
+        record somebody took off the caseload.
+        """
+        student = (
+            self.db.query(Student)
+            .filter(Student.id == student_id, Student.archived_at.is_(None))
+            .first()
+        )
         if not student:
             raise ValueError("Student not found")
         return student

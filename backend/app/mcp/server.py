@@ -794,11 +794,20 @@ def get_student(student_id: int) -> dict:
     try:
         ctx = _ctx()
         _require_student(ctx, student_id, "this student")
-        student = StudentRepository(db).get_student_by_id(student_id)
+        # `include_archived=False` on purpose. The repository default is True
+        # because the React student page is where a therapist unarchives, and
+        # hiding the row there would take the button away. This connection has
+        # no such page: an agent that can read an archived student's whole
+        # record by id would be quoting a retired record as a live one.
+        # list_archive_events is where an archived student is visible here.
+        student = StudentRepository(db).get_student_by_id(
+            student_id, include_archived=False
+        )
         if student is None:
             raise ValueError(
                 f"No student with id {student_id}. Call list_students for the "
-                f"ids that exist."
+                f"ids that exist, or list_archive_events if you think this one "
+                f"was archived."
             )
         return _student_identity(_dump(StudentRead, student), student)
     finally:
@@ -1062,6 +1071,8 @@ def get_schedule(
                         for assignment in b.block_assignments
                         if assignment.status == "assigned"
                         and assignment.student is not None
+                        # The join row is never archived; the student can be.
+                        and assignment.student.archived_at is None
                         and ctx.may_see_student(assignment.student.id)
                     ],
                 }
@@ -1884,6 +1895,10 @@ def list_archive_events(
     kind: student, goal, objective, progress_entry, therapy_session,
     appointment, time_block.
 
+    An ADMIN sees every user's events, because restore_archived lets an admin
+    restore every user's events; `ownedByCaller` says which are their own. A
+    therapist sees only their own, and `ownedByCaller` is true on all of them.
+
     Use this before restore_archived, always: it is how you find the event id
     and how you tell a human what putting it back would bring with it.
     """
@@ -1895,9 +1910,15 @@ def list_archive_events(
                 f"Unknown entity type '{root_entity_type}'. Expected one of: "
                 f"{', '.join(sorted(ARCHIVABLE_ENTITY_TYPES))}."
             )
+        # `None` means every user's events. It is what an admin gets, and it
+        # has to be, because `restore_archived` already lets an admin restore
+        # an event they do not own: listing scoped to self would leave them
+        # able to restore only by GUESSING an id -- a blind write against a
+        # record they were never shown. The caseload check below still applies
+        # to every row, admin or not.
         events = archive_service.list_events(
             db,
-            user_id=ctx.user_id,
+            user_id=None if ctx.is_admin else ctx.user_id,
             include_restored=include_restored,
             root_entity_type=root_entity_type,
             limit=max(1, min(int(limit), 200)),
@@ -1905,6 +1926,7 @@ def list_archive_events(
         rows = []
         for event in events:
             payload = archive_service.event_summary(db, event)
+            payload["ownedByCaller"] = event.user_id == ctx.user_id
             # Every event is scoped to a student where one exists, and it is
             # named by ALIAS -- the same identity every other tool uses.
             try:

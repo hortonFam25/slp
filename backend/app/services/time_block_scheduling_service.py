@@ -241,11 +241,22 @@ class TimeBlockSchedulingService:
         """Combine a date with a time object to create a datetime"""
         return datetime.combine(target_date, time_obj)
     
-    def get_time_block_appointments(self, time_block_id: int) -> List[Appointment]:
-        """Get all appointments for a specific time block"""
-        return self.db.query(Appointment).filter(
+    def get_time_block_appointments(
+        self, time_block_id: int, include_archived: bool = False
+    ) -> List[Appointment]:
+        """Get all appointments for a specific time block.
+
+        Archived appointments are excluded, the same as everywhere else. This
+        method feeds `GET /api/scheduling/time-blocks/{id}/appointments` -- the
+        group block's calendar -- and `cancel_time_block_schedule`, which would
+        otherwise walk an archived row and set a status on it.
+        """
+        query = self.db.query(Appointment).filter(
             Appointment.time_block_id == time_block_id
-        ).all()
+        )
+        if not include_archived:
+            query = query.filter(Appointment.archived_at.is_(None))
+        return query.all()
     
     def cancel_time_block_schedule(self, time_block_id: int, cancel_future_only: bool = True) -> Dict[str, Any]:
         """Cancel scheduled appointments for a time block"""

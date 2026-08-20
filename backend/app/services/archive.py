@@ -87,6 +87,22 @@ RESTORING A CHILD WHOSE PARENT IS ARCHIVED is BLOCKED. Putting a goal back
 underneath an archived student would produce a row that is active, visible to
 no list (its student is hidden) and reachable only by guessing its id. The
 error names the parent's event so the caller knows what to restore first.
+
+RESTORING TWICE AT ONCE is refused by a conditional UPDATE, not by the Python
+check. Two sessions both read `restored_at IS NULL` -- an identity-mapped
+instance is not re-read -- so the winner is decided by
+`UPDATE archive_events SET restored_at = ... WHERE restored_at IS NULL` and its
+rowcount. See `restore` for why the loser must raise rather than report a
+restore of zero rows.
+
+THE TRANSACTION BOUNDARY. `archive`, `archive_many` and `restore` all COMMIT
+the session they are handed, and `restore` ROLLS BACK when it loses the claim
+above. A caller must therefore make its archive or restore the last write of
+the request: anything still pending rides along on the commit, and anything
+pending when a restore loses the race is discarded. Every caller in the tree
+does this today (`StudentRepository.update_student` writes its field changes
+and commits them BEFORE archiving, for this reason), and
+`test_archive_adversarial.py` pins the behaviour so a change to it is loud.
 """
 
 from __future__ import annotations
@@ -610,6 +626,41 @@ def restore(db: Session, user_id: int, event_id: int) -> dict:
             parent.archive_event_id,
         )
 
+    # CLAIM THE EVENT FIRST, as a conditional UPDATE.
+    #
+    # The `event.restored_at is not None` check above is a Python read, and two
+    # sessions restoring the same event both pass it: SQLAlchemy hands each one
+    # its own (or its identity map's already-loaded, and therefore stale)
+    # instance. Without this claim the loser proceeds, clears nothing because
+    # the winner already cleared it, stamps `restored_at` and
+    # `restored_by_user_id` OVER the winner's, and reports a successful restore
+    # of zero rows. That is the worst available outcome: the audit row then
+    # names the wrong person and the wrong minute, and the caller was told it
+    # worked.
+    #
+    # `UPDATE ... WHERE restored_at IS NULL` is atomic on every dialect this
+    # runs on, and its rowcount is the answer to "did I win?".
+    now = datetime.utcnow()
+    claimed = (
+        db.query(ArchiveEvent)
+        .filter(ArchiveEvent.id == event_id, ArchiveEvent.restored_at.is_(None))
+        .update(
+            {
+                ArchiveEvent.restored_at: now,
+                ArchiveEvent.restored_by_user_id: user_id,
+            },
+            synchronize_session=False,
+        )
+    )
+    if claimed == 0:
+        db.rollback()
+        db.expire_all()
+        current = get_event(db, event_id)
+        raise AlreadyRestoredError(
+            f"Archive event {event_id} was already restored on "
+            f"{current.restored_at.isoformat() if current.restored_at else 'an earlier call'}."
+        )
+
     restored: dict[str, int] = {}
     for entity_type, model in ENTITY_MODELS.items():
         values: dict[Any, Any] = {
@@ -626,16 +677,14 @@ def restore(db: Session, user_id: int, event_id: int) -> dict:
         if count:
             restored[COUNT_LABELS[entity_type]] = count
 
-    event.restored_at = datetime.utcnow()
-    event.restored_by_user_id = user_id
     db.commit()
     db.expire_all()
 
     return {
-        "eventId": event.id,
+        "eventId": event_id,
         "rootEntityType": event.root_entity_type,
         "rootEntityId": event.root_entity_id,
-        "restoredAt": event.restored_at.isoformat(),
+        "restoredAt": now.isoformat(),
         "restoredByUserId": user_id,
         "restored": restored,
         "totalRows": sum(restored.values()),

@@ -554,10 +554,12 @@ def get_time_block(
     if not time_block:
         raise HTTPException(status_code=404, detail="Time block not found")
     
+    # `TimeBlock.assigned_students` is the one roster definition, and it drops
+    # archived students -- see the model. Rebuilding it from
+    # `block_assignments` here is how an archived child got back onto a group.
     assigned_students = [
-        _student_summary_for_response(assignment.student, auth)
-        for assignment in time_block.block_assignments
-        if assignment.status == 'assigned'
+        _student_summary_for_response(student, auth)
+        for student in time_block.assigned_students
     ]
     
     return TimeBlockWithStudents(
@@ -985,7 +987,15 @@ def get_time_block_activities(
         assigned_students = []
         if hasattr(activity, 'student_assignments'):
             for assignment in activity.student_assignments:
-                if assignment.status == 'assigned' and assignment.student:
+                # An ARCHIVED student is off this roster.
+                # `activity_student_assignments` has no archive columns (it is a
+                # join row -- see app/services/archive.py), so the child behind
+                # it is filtered where the roster is read.
+                if (
+                    assignment.status == 'assigned'
+                    and assignment.student
+                    and assignment.student.archived_at is None
+                ):
                     first, last = _student_name_parts(assignment.student, auth)
                     assigned_students.append({
                         "id": assignment.student.id,
@@ -1091,7 +1101,15 @@ def update_time_block_activity(
     assigned_students = []
     if hasattr(activity, 'student_assignments'):
         for assignment in activity.student_assignments:
-            if assignment.status == 'assigned' and assignment.student:
+            # An ARCHIVED student is off this roster.
+            # `activity_student_assignments` has no archive columns (it is a
+            # join row -- see app/services/archive.py), so the child behind
+            # it is filtered where the roster is read.
+            if (
+                assignment.status == 'assigned'
+                and assignment.student
+                and assignment.student.archived_at is None
+            ):
                 first, last = _student_name_parts(assignment.student, auth)
                 assigned_students.append({
                     "id": assignment.student.id,
@@ -1303,7 +1321,15 @@ def get_time_block_with_activities(
         assigned_students = []
         if hasattr(activity, 'student_assignments'):
             for assignment in activity.student_assignments:
-                if assignment.status == 'assigned' and assignment.student:
+                # An ARCHIVED student is off this roster.
+                # `activity_student_assignments` has no archive columns (it is a
+                # join row -- see app/services/archive.py), so the child behind
+                # it is filtered where the roster is read.
+                if (
+                    assignment.status == 'assigned'
+                    and assignment.student
+                    and assignment.student.archived_at is None
+                ):
                     first, last = _student_name_parts(assignment.student, auth)
                     assigned_students.append({
                         "id": assignment.student.id,
@@ -1334,10 +1360,12 @@ def get_time_block_with_activities(
         activities.append(activity_dict)
     
     # Get assigned students
+    # `TimeBlock.assigned_students` is the one roster definition, and it drops
+    # archived students -- see the model. Rebuilding it from
+    # `block_assignments` here is how an archived child got back onto a group.
     assigned_students = [
-        _student_summary_for_response(assignment.student, auth)
-        for assignment in time_block.block_assignments
-        if assignment.status == 'assigned'
+        _student_summary_for_response(student, auth)
+        for student in time_block.assigned_students
     ]
     
     # Return as plain dict to avoid Pydantic validation issues

@@ -78,6 +78,33 @@ class CSVImportService:
                     existing_student = self.student_repo.get_student_by_uic(student_data.uic)
                 
                 if existing_student:
+                    # An ARCHIVED student is not overwritable. The UIC lookup
+                    # sees the archive on purpose (the archived row still owns
+                    # the UNIQUE identifier), so the decision belongs here:
+                    # rewriting a hidden record's name, grade and IEP dates
+                    # from a spreadsheet would edit clinical data nobody can
+                    # see, and count it in the report as a routine update.
+                    # `skip_duplicates` still skips -- the row is a duplicate
+                    # either way -- but an explicit `update_existing` is an
+                    # error naming the fix.
+                    if existing_student.archived_at is not None:
+                        if update_existing:
+                            result.failed_imports += 1
+                            result.errors.append({
+                                "row": row_number,
+                                "error": (
+                                    f"Student with UIC '{student_data.uic}' is "
+                                    f"ARCHIVED, not absent. Restore that "
+                                    f"student before importing over their "
+                                    f"record."
+                                ),
+                                "data": mapped_row
+                            })
+                        else:
+                            # Not an update, so not an error -- but creating a
+                            # second record would fail on the UNIQUE uic anyway.
+                            result.skipped_duplicates += 1
+                        continue
                     if skip_duplicates and not update_existing:
                         result.skipped_duplicates += 1
                         continue

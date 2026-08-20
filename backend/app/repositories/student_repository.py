@@ -162,12 +162,49 @@ class StudentRepository:
         student_id: int,
         payload: StudentUpdate,
         allowed_student_ids: Optional[list[int]] = None,
+        user_id: Optional[int] = None,
     ) -> Optional[Student]:
+        """Update a student, routing `is_archived` through the archive service.
+
+        `StudentUpdate.is_archived` predates the archive framework and the React
+        edit form still sends it on every save (it echoes the student's current
+        value back). Left as a plain column write it would archive a student
+        with NO event and NO cascade: the child would vanish from every list
+        while their goals, sessions and appointments stayed active underneath,
+        and nothing could restore them because there was no event to restore.
+
+        So a CHANGE to the flag is delegated:
+
+        * ``True`` on an active student  -> `archive_service.archive`, which
+          writes the event and stamps the whole cascade.
+        * ``False`` on an archived student -> `unarchive_student`, which
+          restores that student's event -- the exact inverse, leaving anything
+          archived under an older event alone.
+        * a value that matches the student's current state -> nothing at all.
+          This is the common case (the form echo) and it must not be a 409.
+
+        `user_id` is who the event is recorded against. A caller that omits it
+        cannot change the flag: the audit row would have no author, and a
+        silent column write is what this method exists to prevent.
+        """
         student = self.get_student_by_id(student_id, allowed_student_ids=allowed_student_ids)
         if not student:
             return None
 
         update_data = payload.dict(exclude_unset=True)
+
+        archive_change: Optional[bool] = None
+        if "is_archived" in update_data:
+            requested = bool(update_data.pop("is_archived"))
+            if requested != (student.archived_at is not None):
+                if user_id is None:
+                    raise ValueError(
+                        "Archiving a student is recorded as an event and needs "
+                        "the acting user. Use PUT /api/students/{id}/archive, "
+                        "PUT /api/students/{id}/unarchive or DELETE "
+                        "/api/students/{id}."
+                    )
+                archive_change = requested
 
         # Update fields, handling ID fields properly
         for field, value in update_data.items():
@@ -182,6 +219,26 @@ class StudentRepository:
 
         self.session.commit()
         self.session.refresh(student)
+
+        # After the ordinary fields, so a failed archive cannot half-apply an
+        # edit -- and so the archive event's timestamp follows the edit that
+        # accompanied it rather than preceding it.
+        if archive_change is True:
+            self.archive_student(
+                student_id,
+                user_id=user_id,
+                allowed_student_ids=allowed_student_ids,
+            )
+        elif archive_change is False:
+            self.unarchive_student(
+                student_id,
+                user_id=user_id,
+                allowed_student_ids=allowed_student_ids,
+            )
+        if archive_change is not None:
+            return self.get_student_by_id(
+                student_id, allowed_student_ids=allowed_student_ids
+            )
         return student
 
     def archive_student(

@@ -100,6 +100,27 @@ class GoalsImportService:
                         "data": raw_row
                     })
                     continue
+
+                # An ARCHIVED student is not an importable one. The UIC lookup
+                # above deliberately sees the archive (`students.uic` is UNIQUE
+                # and the archived row still owns it -- see
+                # `StudentRepository`), so this is the only place the archive
+                # can be honoured. Writing the goal anyway would hang an ACTIVE
+                # row off a hidden parent: invisible to every list, counted by
+                # no total, and precisely the orphan `archive.restore` refuses
+                # to create. The therapist has to restore the student first.
+                if student.archived_at is not None:
+                    result.failed_imports += 1
+                    result.errors.append({
+                        "row": row_number,
+                        "error": (
+                            f"Student with UIC '{goal_import_data.student_uic}' "
+                            f"is ARCHIVED, not absent. Restore that student "
+                            f"before importing goals for them."
+                        ),
+                        "data": raw_row
+                    })
+                    continue
                 
                 # Check for existing goals
                 existing_goals = self.goal_repo.get_goals(student_id=student.id, goal_status="Active")

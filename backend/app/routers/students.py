@@ -135,7 +135,17 @@ def update_student(
     
     ensure_student_access(auth, student_id, action="update student")
     allowed_student_ids = auth.allowed_student_ids if auth.enforce_access and not auth.is_admin else None
-    student = repo.update_student(student_id, payload, allowed_student_ids=allowed_student_ids)
+    try:
+        student = repo.update_student(
+            student_id,
+            payload,
+            allowed_student_ids=allowed_student_ids,
+            # `is_archived` in the body archives or restores through the
+            # archive service, and the event is recorded against this user.
+            user_id=auth.effective_user.id,
+        )
+    except archive_service.ArchiveError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if not student:
         raise HTTPException(status_code=404, detail="Student not found")
     if _should_mask_student_names(auth):

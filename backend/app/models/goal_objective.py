@@ -28,13 +28,31 @@ class GoalObjective(ArchivableMixin, Base):
     session_objectives = relationship("SessionObjective", back_populates="objective", cascade="all, delete-orphan")
 
     @property
+    def active_progress_entries(self):
+        """The progress entries that have not been archived.
+
+        `GoalRepository` attaches `with_loader_criteria` to its eager loads, so
+        under a repository read the loaded collection already excludes archived
+        entries and this filter is a no-op. It is NOT a no-op under a lazy load
+        from `objective.progress_entries` -- which is how every path outside
+        `app/repositories/` reaches them -- so the two properties below go
+        through here rather than over the raw relationship.
+        """
+        return [
+            entry
+            for entry in (self.progress_entries or [])
+            if entry.archived_at is None
+        ]
+
+    @property
     def latest_progress_entry(self):
         """Get the most recent progress entry for this objective"""
-        if self.progress_entries:
-            return max(self.progress_entries, key=lambda x: x.progress_date)
+        entries = self.active_progress_entries
+        if entries:
+            return max(entries, key=lambda x: x.progress_date)
         return None
 
     @property
     def progress_count(self) -> int:
         """Count of progress entries for this objective"""
-        return len(self.progress_entries) if self.progress_entries else 0
+        return len(self.active_progress_entries)
