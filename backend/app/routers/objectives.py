@@ -6,6 +6,7 @@ from app.db.database import get_db
 from app.dependencies.access_control import ensure_goal_access, ensure_objective_access
 from app.dependencies.auth import AuthContext, get_auth_context
 from app.repositories.goal_repository import ObjectiveRepository
+from app.services import archive as archive_service
 from app.schemas.goal_objective import (
     GoalObjectiveCreate,
     GoalObjectiveRead,
@@ -22,6 +23,7 @@ def get_objectives(
     goal_id: Optional[int] = Query(None, description="Filter by goal ID"),
     progress_status: Optional[str] = Query(None, description="Filter by progress status"),
     schedule_frequency: Optional[str] = Query(None, description="Filter by schedule frequency"),
+    include_archived: bool = Query(False, description="Include archived rows (archived means hidden, never deleted)"),
     db: Session = Depends(get_db),
     auth: AuthContext = Depends(get_auth_context),
 ):
@@ -32,7 +34,8 @@ def get_objectives(
     objectives = repo.get_objectives(
         goal_id=goal_id,
         progress_status=progress_status,
-        schedule_frequency=schedule_frequency
+        schedule_frequency=schedule_frequency,
+        include_archived=include_archived,
     )
     if auth.enforce_access and not auth.is_admin:
         return [o for o in objectives if o.goal and o.goal.student_id in auth.allowed_student_ids]
@@ -149,13 +152,32 @@ def update_objective(
 @router.delete("/objectives/{objective_id}")
 def delete_objective(
     objective_id: int,
+    reason: Optional[str] = Query(None, description="Why the objective is being archived"),
     db: Session = Depends(get_db),
     auth: AuthContext = Depends(get_auth_context),
 ):
-    """Delete an objective and all related progress entries"""
+    """Archive an objective with its progress entries. NOTHING IS DELETED.
+
+    Same verb, same path, same message. The objective and its entries are
+    stamped with one archive event; restore it through
+    `POST /api/archive/events/{archiveEventId}/restore`.
+    """
     ensure_objective_access(db, auth, objective_id)
     repo = ObjectiveRepository(db)
-    success = repo.delete_objective(objective_id)
-    if not success:
+    if repo.get_objective_by_id(objective_id) is None:
         raise HTTPException(status_code=404, detail="Objective not found")
-    return {"message": "Objective deleted successfully"}
+    try:
+        event = archive_service.archive(
+            db,
+            user_id=auth.effective_user.id,
+            entity_type=archive_service.ENTITY_OBJECTIVE,
+            entity_id=objective_id,
+            reason=reason,
+        )
+    except archive_service.AlreadyArchivedError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {
+        "message": "Objective deleted successfully",
+        "archived": True,
+        "archiveEventId": event.id,
+    }

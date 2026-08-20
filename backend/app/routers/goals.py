@@ -8,6 +8,7 @@ from app.dependencies.access_control import ensure_goal_access
 from app.dependencies.auth import AuthContext, ensure_student_access, get_auth_context
 from app.repositories.goal_repository import GoalRepository
 from app.repositories.goal_category_repository import GoalCategoryRepository
+from app.services import archive as archive_service
 from app.schemas.iep_goal import IEPGoalCreate, IEPGoalRead, IEPGoalUpdate, IEPGoalWithObjectives, IEPGoalSummary
 from app.schemas.goal_category import GoalCategoryRead, GoalCategoryCreate, GoalCategoryUpdate
 
@@ -82,6 +83,7 @@ def get_goals(
     goal_category_id: Optional[int] = Query(None, description="Filter by goal category"),
     start_date_from: Optional[date] = Query(None, description="Filter goals starting from this date"),
     start_date_to: Optional[date] = Query(None, description="Filter goals starting before this date"),
+    include_archived: bool = Query(False, description="Include archived rows (archived means hidden, never deleted)"),
     db: Session = Depends(get_db),
     auth: AuthContext = Depends(get_auth_context),
 ):
@@ -94,7 +96,8 @@ def get_goals(
         goal_status=goal_status,
         goal_category_id=goal_category_id,
         start_date_from=start_date_from,
-        start_date_to=start_date_to
+        start_date_to=start_date_to,
+        include_archived=include_archived,
     )
     if auth.enforce_access and not auth.is_admin:
         return [g for g in goals if g.student_id in auth.allowed_student_ids]
@@ -229,16 +232,38 @@ def update_goal(
 @router.delete("/goals/{goal_id}")
 def delete_goal(
     goal_id: int,
+    reason: Optional[str] = Query(None, description="Why the goal is being archived"),
     db: Session = Depends(get_db),
     auth: AuthContext = Depends(get_auth_context),
 ):
-    """Delete a goal and all related objectives/progress entries"""
+    """Archive a goal with its objectives and progress entries. NOTHING IS DELETED.
+
+    Same verb, same path, same message the React app reads. The goal and
+    everything under it are stamped with one archive event and hidden;
+    `POST /api/archive/events/{archiveEventId}/restore` brings them back.
+
+    Objectives already archived under an EARLIER event are left with that
+    event -- restoring this one will not resurrect work that was retired before.
+    """
     ensure_goal_access(db, auth, goal_id)
     repo = GoalRepository(db)
-    success = repo.delete_goal(goal_id)
-    if not success:
+    if repo.get_goal_by_id(goal_id) is None:
         raise HTTPException(status_code=404, detail="Goal not found")
-    return {"message": "Goal deleted successfully"}
+    try:
+        event = archive_service.archive(
+            db,
+            user_id=auth.effective_user.id,
+            entity_type=archive_service.ENTITY_GOAL,
+            entity_id=goal_id,
+            reason=reason,
+        )
+    except archive_service.AlreadyArchivedError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {
+        "message": "Goal deleted successfully",
+        "archived": True,
+        "archiveEventId": event.id,
+    }
 
 
 @router.post("/goals/with-objectives", response_model=IEPGoalWithObjectives)

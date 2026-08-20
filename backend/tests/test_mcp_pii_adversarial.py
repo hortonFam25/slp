@@ -643,8 +643,16 @@ def test_no_tool_leaks_the_adversarial_sentinels(hostile, as_principal, tools):
         },
         "list_teachers": {},
         "list_schools": {},
-        "delete_goal": {"goal_id": hostile["goal"], "confirm": False},
-        "delete_progress_entry": {"entry_id": hostile["entry"], "confirm": False},
+        # The archive family replaced delete_goal / delete_progress_entry.
+        # confirm=False throughout: that branch composes a `wouldArchive`
+        # summary out of the very fields this fixture poisoned -- goal text,
+        # objective descriptions, progress comments -- and nothing is archived,
+        # so the adversarial fixtures survive for the assertions below.
+        "archive_goal": {"goal_id": hostile["goal"], "confirm": False},
+        "archive_progress_entry": {"entry_id": hostile["entry"], "confirm": False},
+        "archive_objective": {"objective_id": hostile["objective"], "confirm": False},
+        "archive_student": {"student_id": hostile["student_one"], "confirm": False},
+        "list_archive_events": {"include_restored": True},
     }
     assert set(reads) <= {tool.name for tool in registered_tools()}
 

@@ -434,10 +434,46 @@ def as_principal(principal):
 # ---------------------------------------------------------------------------
 # `seed` -> the keyword arguments to call that tool with. Adding a tool without
 # adding an entry here fails `test_every_registered_tool_has_an_arg_factory`.
-# Write tools really write (the sqlite file is a scratch DB); the two
-# destructive tools are exercised with confirm=False, which is the branch that
-# returns a `wouldDelete` summary — a payload that is itself worth searching
-# for PII.
+# Write tools really write (the sqlite file is a scratch DB).
+#
+# There are no destructive tools over clinical data any more: `delete_goal` and
+# `delete_progress_entry` are gone, replaced by the archive_* family, which
+# hides a record and can be undone. Most of those are still called with
+# confirm=False, because the refusal branch returns a `wouldArchive` summary
+# carrying goal text, objective descriptions and progress comments -- a payload
+# very much worth searching for a name. One of them is called for REAL and then
+# restored, so the round trip through `app.services.archive` is exercised on the
+# same walk.
+
+
+def _round_trip_event_id(seed: dict) -> int:
+    """The event id `archive_objective` produced earlier in this registry walk.
+
+    Not a fixture: the archive happens inside the tool call the walk makes, so
+    the id cannot exist until then. Looked up from the database rather than
+    stashed in a global, which means it is the id the tool really wrote.
+    """
+    from app.db.database import SessionLocal
+    from app.models.archive_event import ArchiveEvent
+
+    db = SessionLocal()
+    try:
+        event = (
+            db.query(ArchiveEvent)
+            .filter(
+                ArchiveEvent.root_entity_type == "objective",
+                ArchiveEvent.root_entity_id == seed["objective_two"],
+                ArchiveEvent.restored_at.is_(None),
+            )
+            .order_by(ArchiveEvent.id.desc())
+            .first()
+        )
+        assert event is not None, "archive_objective should have run before this"
+        return event.id
+    finally:
+        db.close()
+
+
 ARG_FACTORY = {
     "get_caseload_overview": lambda s: {},
     "list_students": lambda s: {"include_archived": True},
@@ -503,8 +539,32 @@ ARG_FACTORY = {
         "goals_addressed": True,
     },
     "update_student": lambda s: {"student_id": s["student_one"], "grade_level": "4"},
-    "delete_progress_entry": lambda s: {"entry_id": s["entry"], "confirm": False},
-    "delete_goal": lambda s: {"goal_id": s["goal"], "confirm": False},
+    # The archive family. Nothing here destroys anything, so unlike the delete
+    # tools they replace, these can be exercised for real -- and one of them is,
+    # as a genuine ROUND TRIP: archive the second objective, list the events,
+    # then restore that event. The archived rows are back before the rest of
+    # this suite reads them, so no other assertion depends on the order the
+    # registry happens to be walked in.
+    #
+    # confirm=False on the other four: that branch returns the `wouldArchive`
+    # summary, carrying goal text, objective descriptions and progress
+    # comments -- exactly the payload worth searching for a child's name.
+    "archive_progress_entry": lambda s: {"entry_id": s["entry"], "confirm": False},
+    "archive_objective": lambda s: {
+        "objective_id": s["objective_two"],
+        "confirm": True,
+        "reason": f"{S1_FIRST} {S1_LAST} has met this step.",
+    },
+    "archive_goal": lambda s: {"goal_id": s["goal"], "confirm": False},
+    "archive_therapy_session": lambda s: {"session_id": s["session"], "confirm": False},
+    "archive_student": lambda s: {"student_id": s["student_one"], "confirm": False},
+    "list_archive_events": lambda s: {"include_restored": True},
+    # The other half of the round trip. The event id comes from the archive
+    # `archive_objective` performed earlier in the same registry walk -- the
+    # tools are registered in that order, so by the time this factory runs the
+    # event exists. Restoring puts the objective and its entries back, which is
+    # what keeps this suite's fixtures whole for the tests that follow.
+    "restore_archived": lambda s: {"event_id": _round_trip_event_id(s), "confirm": True},
     # The staged import, in the order the tools are registered -- which is the
     # order `test_no_tool_leaks_student_pii` walks the registry in, and the
     # order the flow actually runs in. Preview, mapping, validation and the
@@ -551,7 +611,7 @@ def test_registry_is_not_empty():
     """A registry that failed to populate would make every other test vacuous."""
     from app.mcp.server import registered_tools
 
-    assert len(registered_tools()) >= 31
+    assert len(registered_tools()) >= 36
 
 
 def test_every_registered_tool_is_pii_filtered():
@@ -594,7 +654,7 @@ def test_wrapping_preserves_the_tool_schema():
 # every tool, every result
 # ---------------------------------------------------------------------------
 def test_no_tool_leaks_student_pii(seed, as_principal):
-    """Call all 25 tools for real and search the whole JSON of every result."""
+    """Call every registered tool for real and search the whole JSON of each result."""
     from app.mcp.server import registered_tools
 
     called = []

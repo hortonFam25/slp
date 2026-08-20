@@ -7,6 +7,7 @@ from app.db.database import get_db
 from app.dependencies.access_control import ensure_objective_access, ensure_progress_entry_access
 from app.dependencies.auth import AuthContext, get_auth_context
 from app.repositories.goal_repository import ProgressEntryRepository
+from app.services import archive as archive_service
 from app.schemas.goal_objective import (
     ObjectiveProgressEntryCreate,
     ObjectiveProgressEntryRead,
@@ -23,6 +24,7 @@ def get_progress_entries(
     progress_date_from: Optional[date] = Query(None, description="Filter entries from this date"),
     progress_date_to: Optional[date] = Query(None, description="Filter entries to this date"),
     therapist_initials: Optional[str] = Query(None, description="Filter by therapist initials"),
+    include_archived: bool = Query(False, description="Include archived rows (archived means hidden, never deleted)"),
     db: Session = Depends(get_db),
     auth: AuthContext = Depends(get_auth_context),
 ):
@@ -34,7 +36,8 @@ def get_progress_entries(
         objective_id=objective_id,
         progress_date_from=progress_date_from,
         progress_date_to=progress_date_to,
-        therapist_initials=therapist_initials
+        therapist_initials=therapist_initials,
+        include_archived=include_archived,
     )
     if auth.enforce_access and not auth.is_admin:
         return [e for e in entries if e.objective and e.objective.goal and e.objective.goal.student_id in auth.allowed_student_ids]
@@ -106,16 +109,35 @@ def update_progress_entry(
 @router.delete("/progress-entries/{entry_id}")
 def delete_progress_entry(
     entry_id: int,
+    reason: Optional[str] = Query(None, description="Why the entry is being archived"),
     db: Session = Depends(get_db),
     auth: AuthContext = Depends(get_auth_context),
 ):
-    """Delete a progress entry"""
+    """Archive one progress entry. NOTHING IS DELETED.
+
+    Same verb, same path, same message. The observation, its date, its notes and
+    its attribution all survive, hidden;
+    `POST /api/archive/events/{archiveEventId}/restore` puts it back.
+    """
     ensure_progress_entry_access(db, auth, entry_id)
     repo = ProgressEntryRepository(db)
-    success = repo.delete_progress_entry(entry_id)
-    if not success:
+    if repo.get_progress_entry_by_id(entry_id) is None:
         raise HTTPException(status_code=404, detail="Progress entry not found")
-    return {"message": "Progress entry deleted successfully"}
+    try:
+        event = archive_service.archive(
+            db,
+            user_id=auth.effective_user.id,
+            entity_type=archive_service.ENTITY_PROGRESS_ENTRY,
+            entity_id=entry_id,
+            reason=reason,
+        )
+    except archive_service.AlreadyArchivedError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {
+        "message": "Progress entry deleted successfully",
+        "archived": True,
+        "archiveEventId": event.id,
+    }
 
 
 @router.get("/objectives/{objective_id}/latest-progress", response_model=ObjectiveProgressEntryRead)

@@ -1,9 +1,10 @@
 from sqlalchemy import Column, Integer, String, DateTime, Boolean, Text, ForeignKey, func
 from sqlalchemy.orm import relationship
 from app.db.base import Base
+from app.models.archive_event import ArchivableMixin
 
 
-class TimeBlock(Base):
+class TimeBlock(ArchivableMixin, Base):
     __tablename__ = "time_blocks"
 
     id = Column(Integer, primary_key=True, index=True)

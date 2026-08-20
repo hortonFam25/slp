@@ -1,9 +1,13 @@
-from sqlalchemy import Column, Integer, String, Date, DateTime, Boolean, ForeignKey, func
+from datetime import datetime
+
+from sqlalchemy import Column, Integer, String, Date, DateTime, Boolean, ForeignKey, case, func
+from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.orm import relationship
 from app.db.base import Base
+from app.models.archive_event import ArchivableMixin
 
 
-class Student(Base):
+class Student(ArchivableMixin, Base):
     __tablename__ = "students"
 
     id = Column(Integer, primary_key=True, index=True)
@@ -13,7 +17,13 @@ class Student(Base):
     uic = Column(String(50), unique=True, nullable=True, index=True)
     grade_level = Column(String(35), nullable=True, index=True)
     enrollment_status = Column(String(20), nullable=False, server_default='Active', index=True)
-    is_archived = Column(Boolean, nullable=False, server_default='0', index=True)
+    # The ORIGINAL archive flag, from revision 8f054481089d. Still a real
+    # column, still indexed, still what a pre-existing SQL view or report would
+    # read -- but no longer the truth. `archived_at` is, and the hybrid below
+    # keeps this column in lockstep so the two can never disagree. Mapped under
+    # a private name so the public `is_archived` can be the hybrid; the column
+    # in the database is still called `is_archived`.
+    _is_archived = Column("is_archived", Boolean, nullable=False, server_default='0', index=True)
     date_of_birth = Column(Date, nullable=True)
     
     # IEP Date Fields
@@ -50,6 +60,54 @@ class Student(Base):
     # New teacher and case manager relationships
     teacher = relationship("Teacher", foreign_keys=[teacher_id], back_populates="students_as_teacher")
     case_manager = relationship("Teacher", foreign_keys=[case_manager_id], back_populates="students_as_case_manager")
+
+    @hybrid_property
+    def is_archived(self) -> bool:
+        """Archived-ness, derived from `archived_at`, spelled the old way.
+
+        The REST payload (`StudentRead.is_archived`), the React app and every
+        caller written before the archive framework all read this name, so it
+        stays -- as a view over the timestamp rather than as a second fact that
+        can drift from it.
+        """
+        return self.archived_at is not None
+
+    @is_archived.expression
+    def is_archived(cls):  # noqa: N805 - SQLAlchemy hybrid convention
+        """The SQL form, as a CASE rather than as a bare `IS NOT NULL`.
+
+        `Student.is_archived == False` has to compile on SQL Server, which has
+        no boolean type: comparing a predicate to a literal there is a syntax
+        error, while comparing `CASE WHEN ... THEN 1 ELSE 0 END` to 0 is not.
+        New code should filter on `Student.archived_at.is_(None)` directly;
+        this exists so that old code and old saved queries keep working.
+        """
+        return case((cls.archived_at.isnot(None), True), else_=False)
+
+    @is_archived.setter
+    def is_archived(self, value: bool) -> None:
+        """Writing the old flag writes the new truth.
+
+        Setting True on an already-archived student is a no-op on the
+        timestamp: it must not silently re-date an archive, and it must not
+        detach the row from the ArchiveEvent that owns it.
+
+        Setting False is the legacy unarchive -- it clears the timestamp AND the
+        event link, because a row that is active must not claim membership in an
+        archive event (a later restore of that event would otherwise try to
+        re-clear a row it no longer owns). Going through
+        `app.services.archive.restore` is the supported way to reverse an
+        archive; this path exists for `StudentUpdate(is_archived=False)`, which
+        the app has always allowed.
+        """
+        if value:
+            if self.archived_at is None:
+                self.archived_at = datetime.utcnow()
+            self._is_archived = True
+        else:
+            self.archived_at = None
+            self.archive_event_id = None
+            self._is_archived = False
 
     @property
     def full_name(self) -> str:

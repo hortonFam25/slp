@@ -17,20 +17,33 @@ from app.schemas.therapy_session import (
 
 
 class TherapySessionRepository:
-    """Repository for managing therapy sessions and related data"""
+    """Repository for managing therapy sessions and related data.
+
+    ARCHIVE FILTERING. Therapy sessions are archivable, so every read path
+    here excludes archived rows unless the caller passes
+    `include_archived=True`. That includes the statistics builder: a session
+    the therapist has archived must not go on counting towards a
+    service-delivery total a progress report is written from.
+
+    There is no `delete_session` any more -- see `app.services.archive`.
+    """
 
     def __init__(self, db: Session):
         self.db = db
 
-    def get_session_by_appointment_id(self, appointment_id: int) -> Optional[TherapySession]:
+    def get_session_by_appointment_id(
+        self, appointment_id: int, include_archived: bool = False
+    ) -> Optional[TherapySession]:
         """Get therapy session by appointment ID with goals and objectives loaded"""
-        return self.db.query(TherapySession)\
+        query = self.db.query(TherapySession)\
             .options(
                 selectinload(TherapySession.session_goals).joinedload(SessionGoal.goal),
                 selectinload(TherapySession.session_objectives).joinedload(SessionObjective.objective)
             )\
-            .filter(TherapySession.appointment_id == appointment_id)\
-            .first()
+            .filter(TherapySession.appointment_id == appointment_id)
+        if not include_archived:
+            query = query.filter(TherapySession.archived_at.is_(None))
+        return query.first()
 
     def create_session(self, session_data: TherapySessionCreate) -> TherapySession:
         """Create a new therapy session with optional goals and objectives"""
@@ -89,9 +102,22 @@ class TherapySessionRepository:
         self.db.refresh(session)
         return session
 
-    def get_session_by_id(self, session_id: int, include_details: bool = False) -> Optional[TherapySession]:
-        """Get a therapy session by ID with optional related data"""
+    def get_session_by_id(
+        self,
+        session_id: int,
+        include_details: bool = False,
+        include_archived: bool = False,
+    ) -> Optional[TherapySession]:
+        """Get a therapy session by ID with optional related data.
+
+        Archived sessions come back as None by default, which is what turns an
+        archived id into a 404 at the route -- the same answer the caller used
+        to get once the session had been deleted.
+        """
         query = self.db.query(TherapySession).filter(TherapySession.id == session_id)
+
+        if not include_archived:
+            query = query.filter(TherapySession.archived_at.is_(None))
         
         if include_details:
             query = query.options(
@@ -104,10 +130,20 @@ class TherapySessionRepository:
         
         return query.first()
 
-    def get_sessions(self, filters: TherapySessionFilters, skip: int = 0, limit: int = 100, order_by: str = "desc") -> List[TherapySession]:
+    def get_sessions(
+        self,
+        filters: TherapySessionFilters,
+        skip: int = 0,
+        limit: int = 100,
+        order_by: str = "desc",
+        include_archived: bool = False,
+    ) -> List[TherapySession]:
         """Get therapy sessions with filtering and pagination"""
         query = self.db.query(TherapySession).join(Student)
-        
+
+        if not include_archived:
+            query = query.filter(TherapySession.archived_at.is_(None))
+
         # Apply filters
         if filters.student_id:
             query = query.filter(TherapySession.student_id == filters.student_id)
@@ -173,11 +209,15 @@ class TherapySessionRepository:
         limit: int = 75,
         include_goals: bool = False,
         include_objectives: bool = False,
+        include_archived: bool = False,
     ) -> List[TherapySession]:
         """Get a window of school-year sessions centered around an anchor date."""
         query = self.db.query(TherapySession).join(Student).filter(
             TherapySession.student_id == student_id
         )
+
+        if not include_archived:
+            query = query.filter(TherapySession.archived_at.is_(None))
 
         start_datetime = datetime.combine(start_date, datetime.min.time())
         end_datetime = datetime.combine(end_date, datetime.max.time())
@@ -235,15 +275,10 @@ class TherapySessionRepository:
         self.db.refresh(session)
         return session
 
-    def delete_session(self, session_id: int) -> bool:
-        """Delete a therapy session and all related data"""
-        session = self.get_session_by_id(session_id)
-        if not session:
-            return False
-        
-        self.db.delete(session)
-        self.db.commit()
-        return True
+    # `delete_session` is gone. A therapy session is archived now, never
+    # destroyed: see `app.services.archive.archive(db, uid, "therapy_session",
+    # id)` and the DELETE route in `app/routers/therapy_sessions.py`, which
+    # keeps the same verb and path and hides the row instead of removing it.
 
     def update_session_objective(self, session_id: int, objective_id: int, objective_data: 'SessionObjectiveUpdate') -> Optional['SessionObjective']:
         """Update a specific session objective, creating it if it doesn't exist"""
@@ -303,7 +338,9 @@ class TherapySessionRepository:
             .filter(
                 SessionObjective.objective_id == objective_id,
                 SessionObjective.worked_on == True,
-                TherapySession.status == 'completed'
+                TherapySession.status == 'completed',
+                # An archived session is not history a progress report may cite.
+                TherapySession.archived_at.is_(None),
             )\
             .order_by(TherapySession.session_date.desc())\
             .limit(10)\
@@ -325,8 +362,12 @@ class TherapySessionRepository:
         from app.models.goal_objective import GoalObjective
         from app.models.iep_goal import IEPGoal
         
-        # Get goal info
-        goal = self.db.query(IEPGoal).filter(IEPGoal.id == goal_id).first()
+        # Get goal info. An archived goal is not history a report may cite.
+        goal = (
+            self.db.query(IEPGoal)
+            .filter(IEPGoal.id == goal_id, IEPGoal.archived_at.is_(None))
+            .first()
+        )
         
         # Get historical sessions for all objectives under this goal
         sessions = self.db.query(SessionObjective)\
@@ -335,7 +376,9 @@ class TherapySessionRepository:
             .filter(
                 GoalObjective.goal_id == goal_id,
                 SessionObjective.worked_on == True,
-                TherapySession.status == 'completed'
+                TherapySession.status == 'completed',
+                TherapySession.archived_at.is_(None),
+                GoalObjective.archived_at.is_(None),
             )\
             .order_by(TherapySession.session_date.desc())\
             .limit(20)\
@@ -364,7 +407,11 @@ class TherapySessionRepository:
         # If starting from an existing appointment, find the existing therapy session (regardless of status)
         if request.appointment_id and request.session_type == 'link_existing':
             existing_session = self.db.query(TherapySession).filter(
-                TherapySession.appointment_id == request.appointment_id
+                TherapySession.appointment_id == request.appointment_id,
+                # Never resume an archived session: it is hidden everywhere else,
+                # and starting it would put new clinical work into a record the
+                # therapist has already retired.
+                TherapySession.archived_at.is_(None),
             ).first()
             
             if existing_session:
@@ -443,7 +490,10 @@ class TherapySessionRepository:
         elif request.planned_objectives:
             for objective_id in request.planned_objectives:
                 # Get the goal_id for this objective
-                objective = self.db.query(GoalObjective).filter(GoalObjective.id == objective_id).first()
+                objective = self.db.query(GoalObjective).filter(
+                    GoalObjective.id == objective_id,
+                    GoalObjective.archived_at.is_(None),
+                ).first()
                 if objective:
                     planned_objectives.append(SessionObjectiveCreate(
                         objective_id=objective_id,
@@ -492,41 +542,61 @@ class TherapySessionRepository:
         self.db.refresh(session)
         return session
 
-    def get_student_sessions(self, student_id: int, limit: int = 50) -> List[TherapySession]:
+    def get_student_sessions(
+        self, student_id: int, limit: int = 50, include_archived: bool = False
+    ) -> List[TherapySession]:
         """Get recent therapy sessions for a specific student"""
-        return self.db.query(TherapySession)\
-            .filter(TherapySession.student_id == student_id)\
-            .order_by(TherapySession.session_date.desc())\
-            .limit(limit)\
-            .all()
+        query = self.db.query(TherapySession)\
+            .filter(TherapySession.student_id == student_id)
+        if not include_archived:
+            query = query.filter(TherapySession.archived_at.is_(None))
+        return query.order_by(TherapySession.session_date.desc()).limit(limit).all()
 
-    def get_active_sessions(self) -> List[TherapySession]:
+    def get_active_sessions(self, include_archived: bool = False) -> List[TherapySession]:
         """Get all currently active (in-progress) therapy sessions"""
-        return self.db.query(TherapySession)\
-            .filter(TherapySession.status == "in_progress")\
+        query = self.db.query(TherapySession)\
+            .filter(TherapySession.status == "in_progress")
+        if not include_archived:
+            query = query.filter(TherapySession.archived_at.is_(None))
+        return query\
             .options(joinedload(TherapySession.student))\
             .order_by(TherapySession.start_time.asc())\
             .all()
 
-    def get_sessions_needing_followup(self) -> List[TherapySession]:
+    def get_sessions_needing_followup(
+        self, include_archived: bool = False
+    ) -> List[TherapySession]:
         """Get completed sessions that need follow-up"""
-        return self.db.query(TherapySession)\
+        query = self.db.query(TherapySession)\
             .filter(
                 and_(
                     TherapySession.status == "completed",
                     TherapySession.follow_up_needed == True
                 )
-            )\
+            )
+        if not include_archived:
+            query = query.filter(TherapySession.archived_at.is_(None))
+        return query\
             .options(joinedload(TherapySession.student))\
             .order_by(TherapySession.session_date.desc())\
             .all()
 
-    def get_session_statistics(self, student_id: Optional[int] = None, 
+    def get_session_statistics(self, student_id: Optional[int] = None,
                               start_date: Optional[date] = None,
-                              end_date: Optional[date] = None) -> Dict[str, Any]:
-        """Get statistical summary of therapy sessions"""
+                              end_date: Optional[date] = None,
+                              include_archived: bool = False) -> Dict[str, Any]:
+        """Get statistical summary of therapy sessions.
+
+        AGGREGATE DECISION: archived sessions are EXCLUDED by default. These
+        numbers are what a therapist reads as "how much service was delivered",
+        and a session she archived is one she has decided not to count. Pass
+        `include_archived=True` for a total over the whole record.
+        """
         query = self.db.query(TherapySession)
-        
+
+        if not include_archived:
+            query = query.filter(TherapySession.archived_at.is_(None))
+
         if student_id:
             query = query.filter(TherapySession.student_id == student_id)
         

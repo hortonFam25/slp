@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.settings import settings
 from app.routers import health, students, csv_import, goals, objectives, progress_entries, schools, teachers, scheduling, therapy_sessions, eligibilities, goals_import, ai_chat, auth_access, api_tokens
+from app.routers import archive
 from app.routers import oauth_public
 from app.routers import import_upload
 from app.db import database
@@ -79,6 +80,9 @@ app.include_router(therapy_sessions.router)
 app.include_router(eligibilities.router)
 app.include_router(ai_chat.router)
 app.include_router(api_tokens.router)
+# The archive ledger. Every DELETE route above now archives instead of
+# deleting; this is where those events are listed and reversed.
+app.include_router(archive.router)
 
 # /mcp is an ASGI application, not a route. It is intercepted ahead of routing
 # (see app.mcp.auth for why a plain Mount cannot answer a bare POST to /mcp),

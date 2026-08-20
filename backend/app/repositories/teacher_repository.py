@@ -87,10 +87,10 @@ class TeacherRepository:
                 or_(
                     TeacherSchoolAssignment.school_id == school_id,
                     Teacher.students_as_teacher.any(
-                        and_(Student.school_id == school_id, Student.enrollment_status == "Active", Student.is_archived == False)
+                        and_(Student.school_id == school_id, Student.enrollment_status == "Active", Student.archived_at.is_(None))
                     ),
                     Teacher.students_as_case_manager.any(
-                        and_(Student.school_id == school_id, Student.enrollment_status == "Active", Student.is_archived == False)
+                        and_(Student.school_id == school_id, Student.enrollment_status == "Active", Student.archived_at.is_(None))
                     )
                 )
             )

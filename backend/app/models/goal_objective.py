@@ -1,9 +1,10 @@
 from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, UniqueConstraint, CheckConstraint, func
 from sqlalchemy.orm import relationship
 from app.db.base import Base
+from app.models.archive_event import ArchivableMixin
 
 
-class GoalObjective(Base):
+class GoalObjective(ArchivableMixin, Base):
     __tablename__ = "goal_objectives"
 
     id = Column(Integer, primary_key=True, index=True)
