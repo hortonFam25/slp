@@ -220,61 +220,96 @@ def convert_legacy_csv_to_goal_import(raw_row: dict) -> GoalImportRow:
     )
 
 
+# The template's shape, spelled ONCE. Both the header row and the sample row
+# are derived from it, which is the entire point: they used to be two
+# hand-maintained literals, they had drifted apart, and `csv.DictWriter` raises
+# `ValueError: dict contains fields not in fieldnames` the instant they
+# disagree -- so `GET /api/goals-csv/template` returned a 500 for every request
+# that ever reached it. Three ways they had drifted, for the record:
+# 'prog Date1 ' carried a trailing space the sample row did not, 'progdate2'
+# was spelled differently in the two lists, and 'Prog Comments 2'..5 existed
+# only in the sample row, so a therapist's filled-in template could not carry
+# progress comments for objectives 2 through 5 at all.
+#
+# The spellings below are the ones `convert_legacy_csv_to_goal_import` reads
+# and `GET /api/goals-csv/export` writes. A template filled in by a therapist
+# therefore round-trips through the importer, and an export can be edited and
+# re-imported without renaming a single column.
+_TEMPLATE_LEADING_COLUMNS = ('ID', 'Goal', 'Responsible Staff')
+_TEMPLATE_OBJECTIVE_SLOTS = 5
+
+
+def goals_csv_template_columns() -> List[str]:
+    """The goals-import template's column names, in file order."""
+    columns = list(_TEMPLATE_LEADING_COLUMNS)
+    for slot in range(1, _TEMPLATE_OBJECTIVE_SLOTS + 1):
+        columns.extend([
+            f'Objective{slot}',
+            f'Schedule{slot}',
+            f'Prog Comments {slot}',
+            f'prog Date{slot}',
+        ])
+    return columns
+
+
+# One worked example, keyed by the same column names. Anything omitted here is
+# written as an empty cell -- slots 4 and 5 are blank on purpose, so the
+# therapist can see the columns exist without being told they are required.
+_TEMPLATE_EXAMPLE_ROW = {
+    'ID': '1234567890',
+    'Goal': (
+        'Student will improve expressive language skills by using 4-5 word '
+        'utterances with a variety of sentence structures during structured '
+        'and natural settings.'
+    ),
+    'Responsible Staff': 'Speech Pathologist',
+    'Objective1': (
+        'Student will combine 3-4 words to describe actions and locations in '
+        'structured activities'
+    ),
+    'Schedule1': 'Monthly updates',
+    'Prog Comments 1': (
+        'Student is producing 3-4 word phrases in 4 out of 5 opportunities on '
+        'average.'
+    ),
+    'prog Date1': '2/24/2025',
+    'Objective2': (
+        'Student will form 4-5 word sentences using different sentence '
+        'structures in structured activities'
+    ),
+    'Schedule2': 'Monthly updates',
+    'Prog Comments 2': 'Working on expanding sentence length with visual supports.',
+    'prog Date2': '2/24/2025',
+    'Objective3': (
+        'Student will spontaneously produce 4-5 word sentences in response to '
+        'questions'
+    ),
+    'Schedule3': 'Monthly updates',
+    'Prog Comments 3': 'Beginning to show spontaneous use of longer phrases.',
+    'prog Date3': '2/24/2025',
+}
+
+
 def generate_goals_csv_template() -> str:
-    """Generate a CSV template for goals and objectives import"""
-    headers = [
-        'ID',
-        'Goal',
-        'Responsible Staff',
-        'Objective1',
-        'Schedule1',
-        'Prog Comments 1',
-        'prog Date1 ',  # Note: extra space to match your CSV format
-        'Objective2',
-        'Schedule2',
-        'progdate2',  # Note: different format to match your CSV
-        'Objective3',
-        'Schedule3',
-        'prog Date3',
-        'Objective4',
-        'Schedule4',
-        'prog Date4',
-        'Objective5',
-        'Schedule5',
-        'prog Date5'
-    ]
-    
-    sample_data = [
-        {
-            'ID': '1234567890',
-            'Goal': 'Student will improve expressive language skills by using 4-5 word utterances with a variety of sentence structures during structured and natural settings.',
-            'Responsible Staff': 'Speech Pathologist',
-            'Objective1': 'Student will combine 3-4 words to describe actions and locations in structured activities',
-            'Schedule1': 'Monthly updates',
-            'Prog Comments 1': 'Student is producing 3-4 word phrases in 4 out of 5 opportunities on average.',
-            'prog Date1': '2/24/2025',
-            'Objective2': 'Student will form 4-5 word sentences using different sentence structures in structured activities',
-            'Schedule2': 'Monthly updates',
-            'Prog Comments 2': 'Working on expanding sentence length with visual supports.',
-            'prog Date2': '2/24/2025',
-            'Objective3': 'Student will spontaneously produce 4-5 word sentences in response to questions',
-            'Schedule3': 'Monthly updates',
-            'Prog Comments 3': 'Beginning to show spontaneous use of longer phrases.',
-            'prog Date3': '2/24/2025',
-            'Objective4': '',
-            'Schedule4': '',
-            'Prog Comments 4': '',
-            'prog Date4': '',
-            'Objective5': '',
-            'Schedule5': '',
-            'Prog Comments 5': '',
-            'prog Date5': ''
-        }
-    ]
-    
+    """Generate a CSV template for goals and objectives import."""
+    headers = goals_csv_template_columns()
+
+    unknown = sorted(set(_TEMPLATE_EXAMPLE_ROW) - set(headers))
+    if unknown:
+        # Loud and immediate rather than a `ValueError` from inside csv with no
+        # hint of which literal is wrong. This can only fire if somebody edits
+        # the example row; the template test catches it first.
+        raise ValueError(
+            'The goals CSV template example row has columns the header row does '
+            f'not: {unknown}. Add them to goals_csv_template_columns() or fix '
+            'the spelling.'
+        )
+
+    sample_row = {column: _TEMPLATE_EXAMPLE_ROW.get(column, '') for column in headers}
+
     output = StringIO()
     writer = csv.DictWriter(output, fieldnames=headers)
     writer.writeheader()
-    writer.writerows(sample_data)
-    
+    writer.writerow(sample_row)
+
     return output.getvalue()

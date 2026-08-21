@@ -17,16 +17,41 @@ bugs if they did not:
   that could not see an archived student would report "no such UIC" and then
   fail on the constraint, and a caseload import would offer to re-create a
   child who is sitting in the archive. Archived rows MUST be visible here.
+
+THE EAGER LOAD IS FILTERED SEPARATELY. `get_student_by_id` and `create_student`
+attach the student's ELIGIBILITY determinations, which are archivable in their
+own right, and a `joinedload` does not inherit the outer query's WHERE clause.
+Without `with_loader_criteria` an archived eligibility would disappear from
+`GET /api/eligibilities/students/{id}` and still be nested inside the student
+record that the detail page and the MCP `get_student` tool both read -- the
+same failure `GoalRepository` guards against for objectives and progress
+entries. `with_loader_criteria` rather than a filtered relationship
+`primaryjoin`: a collection that silently loses a member is how a delete-orphan
+cascade destroys a row nobody asked to destroy.
 """
 
 from typing import List, Optional
 
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session, joinedload, with_loader_criteria
 
 from app.models.student import Student
 from app.models.student_eligibility import StudentEligibility
 from app.schemas.student import StudentCreate, StudentUpdate
 from app.services import archive as archive_service
+
+
+def _active_eligibilities(include_archived: bool) -> list:
+    """Loader options that keep archived eligibilities out of an eager load.
+
+    Applied to the whole entity rather than to a named relationship, so a query
+    below that reaches `StudentEligibility` by another path is covered without
+    being listed here.
+    """
+    if include_archived:
+        return []
+    return [
+        with_loader_criteria(StudentEligibility, StudentEligibility.archived_at.is_(None))
+    ]
 
 
 class StudentRepository:
@@ -74,13 +99,22 @@ class StudentRepository:
         See the module docstring: the detail page is where a therapist
         unarchives, so hiding archived students from a by-id lookup would take
         the Unarchive button away from the only page that shows it.
+
+        `include_archived` is about the STUDENT row and nothing else. Archived
+        ELIGIBILITIES are filtered out of the eager load either way, and
+        deliberately: an eligibility is archived by its own decision under its
+        own event, so an archived student loaded for the Unarchive button must
+        still not show a determination somebody retired separately. The archive
+        view for those is `GET /api/eligibilities/students/{id}` with
+        `include_archived=true`.
         """
         student = self.session.query(Student)\
             .options(
                 joinedload(Student.eligibilities).joinedload(StudentEligibility.eligibility_category),
                 joinedload(Student.school),
                 joinedload(Student.teacher),
-                joinedload(Student.case_manager)
+                joinedload(Student.case_manager),
+                *_active_eligibilities(include_archived=False),
             )\
             .filter(Student.id == student_id)
         if not include_archived:
@@ -152,7 +186,8 @@ class StudentRepository:
             joinedload(Student.school),
             joinedload(Student.teacher),
             joinedload(Student.case_manager),
-            joinedload(Student.eligibilities)
+            joinedload(Student.eligibilities),
+            *_active_eligibilities(include_archived=False),
         ).filter(Student.id == student.id).first()
 
         return student

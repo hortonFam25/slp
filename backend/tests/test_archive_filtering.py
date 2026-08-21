@@ -63,12 +63,14 @@ def world(db):
     """
     from app.models.appointment import Appointment
     from app.models.block_assignment import BlockAssignment
+    from app.models.eligibility_category import EligibilityCategory
     from app.models.goal_category import GoalCategory
     from app.models.goal_objective import GoalObjective
     from app.models.iep_goal import IEPGoal
     from app.models.objective_progress_entry import ObjectiveProgressEntry
     from app.models.school import School
     from app.models.student import Student
+    from app.models.student_eligibility import StudentEligibility
     from app.models.teacher import Teacher
     from app.models.therapy_session import TherapySession
     from app.models.time_block import TimeBlock
@@ -78,6 +80,13 @@ def world(db):
     school = School(name="Filtering Elementary", district="Filtering ISD")
     teacher = Teacher(first_name="Filtra", last_name="Testerson", title="Teacher")
     category = GoalCategory(name="Articulation (filtering-test)")
+    # Two categories, because an eligibility row is unique per
+    # (student, category): the active and archived halves of the pair cannot
+    # share one.
+    eligibility_categories = [
+        EligibilityCategory(name="SLI (filtering-test)", code="FILT-SLI", display_order=91),
+        EligibilityCategory(name="OHI (filtering-test)", code="FILT-OHI", display_order=92),
+    ]
     user = User(
         external_auth_id="pytest-archive-filtering",
         email="filtering@example.invalid",
@@ -85,7 +94,7 @@ def world(db):
         role="therapist",
         is_active=True,
     )
-    db.add_all([school, teacher, category, user])
+    db.add_all([school, teacher, category, user, *eligibility_categories])
     db.flush()
 
     def make_student(tag: str) -> Student:
@@ -216,6 +225,20 @@ def world(db):
     active_appointment = make_appointment(active_student, 15)
     archived_appointment = make_appointment(active_student, 16)
 
+    def make_eligibility(student: Student, category_index: int, day: int) -> StudentEligibility:
+        row = StudentEligibility(
+            student_id=student.id,
+            eligibility_category_id=eligibility_categories[category_index].id,
+            start_date=date(2026, 1, day),
+            is_primary=category_index == 0,
+        )
+        db.add(row)
+        db.flush()
+        return row
+
+    active_eligibility = make_eligibility(active_student, 0, 5)
+    archived_eligibility = make_eligibility(active_student, 1, 6)
+
     db.add_all(
         [
             BlockAssignment(
@@ -251,6 +274,8 @@ def world(db):
         "archived_block": archived_block.id,
         "active_appointment": active_appointment.id,
         "archived_appointment": archived_appointment.id,
+        "active_eligibility": active_eligibility.id,
+        "archived_eligibility": archived_eligibility.id,
         "series": "filtering-series",
     }
 
@@ -264,6 +289,7 @@ def world(db):
         ("therapy_session", "archived_session"),
         ("appointment", "archived_appointment"),
         ("time_block", "archived_block"),
+        ("student_eligibility", "archived_eligibility"),
         ("student", "archived_student"),
     ):
         archive_service.archive(db, user_id=user.id, entity_type=entity_type, entity_id=ids[key])
@@ -533,11 +559,29 @@ CASES: list[tuple[str, str, object, str, str, object]] = [
         "archived_student",
         _id_of_single,
     ),
+    # ------------------------------------------------------- eligibilities
+    (
+        "EligibilityRepository",
+        "get_student_eligibilities",
+        lambda w: {"student_id": w["active_student"]},
+        "active_eligibility",
+        "archived_eligibility",
+        _ids_of,
+    ),
+    (
+        "EligibilityRepository",
+        "get_student_eligibility_by_id",
+        lambda w: {"eligibility_id": w["archived_eligibility"]},
+        None,
+        "archived_eligibility",
+        _id_of_single,
+    ),
 ]
 
 
 def _repo(name, db):
     from app.repositories.appointment_repository import AppointmentRepository
+    from app.repositories.eligibility_repository import EligibilityRepository
     from app.repositories.goal_repository import (
         GoalRepository,
         ObjectiveRepository,
@@ -550,6 +594,7 @@ def _repo(name, db):
 
     classes = {
         "AppointmentRepository": AppointmentRepository,
+        "EligibilityRepository": EligibilityRepository,
         "GoalRepository": GoalRepository,
         "ObjectiveRepository": ObjectiveRepository,
         "ProgressEntryRepository": ProgressEntryRepository,
@@ -609,6 +654,11 @@ SEES_ARCHIVED_BY_DESIGN = {
 # writes, helpers, and reads over tables with no archive columns.
 EXEMPT_METHODS = {
     ("GoalRepository", "get_goal_categories"),  # goal_categories is not archivable
+    # eligibility_categories is not archivable either, and must not become so:
+    # it is the shared vocabulary every child's determination points at, so
+    # archiving one child's eligibility cannot be allowed to touch it.
+    ("EligibilityRepository", "get_all_categories"),
+    ("EligibilityRepository", "get_category_by_id"),
     ("TimeBlockRepository", "get_eligible_students_for_time_block"),  # asserted below
     ("TimeBlockRepository", "get_time_block_appointments_by_series"),  # asserted below
     ("TherapySessionRepository", "get_session_by_appointment_id"),  # asserted below
@@ -617,12 +667,11 @@ EXEMPT_METHODS = {
     ("TherapySessionRepository", "get_objective_history"),  # asserted below
     ("TherapySessionRepository", "get_goal_history"),  # asserted below
     ("TherapySessionRepository", "get_active_sessions"),  # asserted below
-    # Carries the archive filter (see the method), but cannot be CALLED: its
-    # slot loop does `current_time.replace(minute=minute + duration)` and dies
-    # with "minute must be in 0..59" on the first iteration past :29, for every
-    # input. That is a pre-existing bug, older than this feature and unrelated
-    # to it, so it is not fixed here -- but it is the reason there is no
-    # behavioural assertion for this method.
+    # asserted below. (It used to be here with no assertion at all, because the
+    # method raised "minute must be in 0..59" on every input -- its slot loop
+    # stepped the clock with `replace(minute=...)`. That is fixed; the loop is
+    # `timedelta` now, and the filter is exercised for real. The full behaviour
+    # of the method lives in tests/test_available_time_slots.py.)
     ("AppointmentRepository", "get_available_time_slots"),
     ("AppointmentRepository", "check_time_conflict"),  # asserted below
     ("TimeBlockRepository", "check_teacher_conflict"),  # asserted below
@@ -630,6 +679,7 @@ EXEMPT_METHODS = {
 
 _ARCHIVE_AWARE_REPOS = (
     "AppointmentRepository",
+    "EligibilityRepository",
     "GoalRepository",
     "ObjectiveRepository",
     "ProgressEntryRepository",
@@ -834,6 +884,19 @@ def test_archived_appointments_do_not_hold_their_slot(db, world):
         end_datetime=active.end_datetime,
     ) is True
 
+    # The same decision on the other scheduling predicate: the archived
+    # appointment's start comes back as an offered slot, the active one's does
+    # not. The fixture books 15:00-15:30 (active) and 16:00-16:30 (archived).
+    slots = repo.get_available_time_slots(
+        student_id=world["active_student"],
+        target_date=active.start_datetime.date(),
+        duration_minutes=30,
+        start_hour=15,
+        end_hour=17,
+    )
+    assert archived.start_datetime in slots
+    assert active.start_datetime not in slots
+
 
 def test_archived_time_blocks_do_not_hold_the_teacher(db, world):
     from app.models.time_block import TimeBlock
@@ -897,6 +960,37 @@ def test_archived_children_do_not_ride_along_inside_a_goal(db, world):
         world["active_goal"], include_archived=True
     )
     assert world["archived_objective"] in {o.id for o in everything.objectives}
+    db.expire_all()
+
+
+def test_archived_eligibilities_do_not_ride_along_inside_a_student(db, world):
+    """The same eager-load trap, on the student record this time.
+
+    `get_student_by_id` joinedloads `Student.eligibilities`, and a joinedload
+    does not inherit the outer WHERE. Without `with_loader_criteria` an
+    archived determination would vanish from
+    `GET /api/eligibilities/students/{id}` and still be sitting inside the
+    student payload the detail page and the MCP `get_student` tool both read.
+
+    Note `include_archived=True` below: it is about the STUDENT row, and must
+    NOT bring archived eligibilities back with it. The detail page loads an
+    archived student so a therapist can unarchive them; a determination they
+    retired separately, under its own event, stays hidden.
+    """
+    from app.repositories.student_repository import StudentRepository
+
+    db.expire_all()
+    student = StudentRepository(db).get_student_by_id(world["active_student"])
+    ids = {e.id for e in student.eligibilities}
+    assert world["active_eligibility"] in ids
+    assert world["archived_eligibility"] not in ids
+
+    db.expire_all()
+    archived_student = StudentRepository(db).get_student_by_id(
+        world["archived_student"], include_archived=True
+    )
+    assert archived_student is not None
+    assert world["archived_eligibility"] not in {e.id for e in archived_student.eligibilities}
     db.expire_all()
 
 

@@ -52,6 +52,11 @@ ENTITY_PROGRESS_ENTRY = "progress_entry"
 ENTITY_THERAPY_SESSION = "therapy_session"
 ENTITY_APPOINTMENT = "appointment"
 ENTITY_TIME_BLOCK = "time_block"
+# The row that says which disability category a child qualifies under. Singular
+# on purpose: the table is `student_eligibilities`, but every other member of
+# this vocabulary names ONE row, and `list_archive_events(root_entity_type=...)`
+# reads better for it.
+ENTITY_STUDENT_ELIGIBILITY = "student_eligibility"
 
 ARCHIVABLE_ENTITY_TYPES = (
     ENTITY_STUDENT,
@@ -61,6 +66,7 @@ ARCHIVABLE_ENTITY_TYPES = (
     ENTITY_THERAPY_SESSION,
     ENTITY_APPOINTMENT,
     ENTITY_TIME_BLOCK,
+    ENTITY_STUDENT_ELIGIBILITY,
 )
 
 
@@ -106,7 +112,7 @@ class ArchiveEvent(Base):
 class ArchivableMixin:
     """The two columns every archivable table carries.
 
-    A mixin rather than seven copy-pasted pairs so that "what does archivable
+    A mixin rather than eight copy-pasted pairs so that "what does archivable
     mean" has one answer, and so `app/services/archive.py` can assert a model is
     archivable by an isinstance check on the class rather than by hoping.
 

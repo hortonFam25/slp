@@ -1,5 +1,14 @@
-from typing import List
-from fastapi import APIRouter, Depends, HTTPException, status
+"""Eligibility categories, and one child's determinations under them.
+
+NOTHING HERE DELETES. `DELETE /api/eligibilities/students/{id}` archives --
+same verb, same path, same 404 -- and returns the `archiveEventId` that puts
+the row back. See `app/services/archive.py`; the routers either side of this
+one made the same swap.
+"""
+
+from typing import List, Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from app.db.database import get_db
@@ -12,6 +21,7 @@ from app.schemas.eligibility import (
     StudentEligibilityCreate,
     StudentEligibilityUpdate
 )
+from app.services import archive as archive_service
 
 router = APIRouter(prefix="/api", tags=["eligibilities"], dependencies=[Depends(get_auth_context)])
 
@@ -29,13 +39,20 @@ def get_eligibility_categories(
 @router.get("/eligibilities/students/{student_id}", response_model=List[StudentEligibilityRead])
 def get_student_eligibilities(
     student_id: int,
+    include_archived: bool = Query(
+        False, description="Include eligibilities that have been archived"
+    ),
     db: Session = Depends(get_db),
     auth: AuthContext = Depends(get_auth_context),
 ):
-    """Get all eligibilities for a specific student"""
+    """Get all eligibilities for a specific student.
+
+    Archived determinations are hidden by default. `include_archived=true` is
+    the archive view -- what was on the record and is not any more.
+    """
     ensure_student_access(auth, student_id, action="get student eligibilities")
     repo = EligibilityRepository(db)
-    return repo.get_student_eligibilities(student_id)
+    return repo.get_student_eligibilities(student_id, include_archived=include_archived)
 
 
 @router.post("/eligibilities/students", response_model=StudentEligibilityRead)
@@ -89,17 +106,43 @@ def update_student_eligibility(
 @router.delete("/eligibilities/students/{eligibility_id}")
 def delete_student_eligibility(
     eligibility_id: int,
+    reason: Optional[str] = Query(
+        None, description="Why the eligibility is being archived"
+    ),
     db: Session = Depends(get_db),
     auth: AuthContext = Depends(get_auth_context),
 ):
-    """Delete a student eligibility"""
+    """Archive a student eligibility. NOTHING IS DELETED.
+
+    Same verb, same path, and the same success message the React app already
+    reads -- because this route used to destroy the row and the app was written
+    against that. What changed is underneath: the determination is stamped with
+    one archive event and hidden, and
+    `POST /api/archive/events/{archiveEventId}/restore` puts it back.
+
+    An eligibility determination is a legal finding about a child. Removing it
+    outright made "this was taken off the record on the 4th" and "this never
+    happened" the same fact, which is precisely the pair an IEP audit has to be
+    able to tell apart.
+    """
     ensure_eligibility_access(db, auth, eligibility_id)
     repo = EligibilityRepository(db)
-    
-    if not repo.delete_student_eligibility(eligibility_id):
+
+    try:
+        event = repo.archive_student_eligibility(
+            eligibility_id, user_id=auth.effective_user.id, reason=reason
+        )
+    except archive_service.AlreadyArchivedError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    if event is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Student eligibility not found"
         )
-    
-    return {"message": "Student eligibility deleted successfully"}
+
+    return {
+        "message": "Student eligibility deleted successfully",
+        "archived": True,
+        "archiveEventId": event.id,
+    }

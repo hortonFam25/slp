@@ -25,6 +25,11 @@ class AppointmentRepository:
     strictly worse than a deleted one, which is the opposite of the point.
     """
 
+    #: How far apart the candidate starts offered by `get_available_time_slots`
+    #: sit. Five minutes, so a 30-minute appointment can still be slid in behind
+    #: one that ended at :25.
+    SLOT_STEP_MINUTES = 5
+
     def __init__(self, db: Session):
         self.db = db
 
@@ -680,7 +685,20 @@ class AppointmentRepository:
         start_hour: int = 8,
         end_hour: int = 17
     ) -> List[datetime]:
-        """Get available time slots for a student on a given date"""
+        """Get available time slots for a student on a given date.
+
+        Slot starts walk the window in `SLOT_STEP_MINUTES` increments from
+        `start_hour` up to `end_hour`, and a slot is only offered if the WHOLE
+        appointment fits inside the window -- a 30-minute slot starting at 16:45
+        is not available in an 8-17 day, because it would run past the end of it.
+
+        The arithmetic is `timedelta`, not `datetime.replace(minute=...)`. The
+        previous implementation stepped the clock by rewriting the minute field,
+        which raises `ValueError: minute must be in 0..59` the moment the sum
+        crosses the hour -- so the method died on every call, and the route on
+        top of it (`GET /api/scheduling/students/{id}/available-slots`) returned
+        a 500 for every request. `timedelta` carries into the hour by itself.
+        """
         # Get all appointments for the student on the target date
         start_datetime = datetime.combine(target_date, datetime.min.time())
         end_datetime = datetime.combine(target_date, datetime.max.time())
@@ -698,26 +716,30 @@ class AppointmentRepository:
         ).order_by(Appointment.start_datetime).all()
 
         # Generate potential time slots
-        available_slots = []
-        current_time = datetime.combine(target_date, datetime.min.time().replace(hour=start_hour))
-        end_time = datetime.combine(target_date, datetime.min.time().replace(hour=end_hour))
+        available_slots: List[datetime] = []
+        if duration_minutes <= 0:
+            return available_slots
 
-        while current_time < end_time:
-            slot_end = current_time.replace(minute=current_time.minute + duration_minutes)
-            
+        step = timedelta(minutes=self.SLOT_STEP_MINUTES)
+        slot_length = timedelta(minutes=duration_minutes)
+        current_time = datetime.combine(target_date, datetime.min.time()) + timedelta(hours=start_hour)
+        end_time = datetime.combine(target_date, datetime.min.time()) + timedelta(hours=end_hour)
+
+        while current_time + slot_length <= end_time:
+            slot_end = current_time + slot_length
+
             # Check if this slot conflicts with any existing appointment
             conflict = False
             for appointment in existing_appointments:
-                if (current_time < appointment.end_datetime and 
+                if (current_time < appointment.end_datetime and
                     slot_end > appointment.start_datetime):
                     conflict = True
                     break
-            
+
             if not conflict:
                 available_slots.append(current_time)
-            
-            # Move to next 5-minute increment
-            current_time = current_time.replace(minute=current_time.minute + 5)
+
+            current_time += step
 
         return available_slots
 

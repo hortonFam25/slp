@@ -470,6 +470,31 @@ again.
 
 ---
 
+## The archive columns
+
+Nothing in this application deletes clinical data. Every table that used to be
+the target of a DELETE carries `archived_at` (NULL means active, and every
+default query path filters on it) plus `archive_event_id` (the `archive_events`
+row that stamped it, which is what makes a restore surgical). See
+[`backend/app/models/archive_event.py`](../backend/app/models/archive_event.py)
+for the argument and
+[`backend/app/services/archive.py`](../backend/app/services/archive.py) for the
+cascades.
+
+**The eight archivable tables:** `students`, `iep_goals`, `goal_objectives`,
+`objective_progress_entries`, `therapy_sessions`, `appointments`, `time_blocks`,
+`student_eligibilities`.
+
+The first seven came from `a1c4e8b60d37`; `student_eligibilities` came from
+`d3f8b2a70c19`, once `DELETE /api/eligibilities/students/{id}` turned out to be
+the last hard delete left in the tree. `eligibility_categories`,
+`goal_categories` and `block_assignments` deliberately do NOT get the pair —
+the first two are shared lookups the whole caseload points at, and the third is
+a join row with no clinical content that is already unreachable once both its
+ends are archived.
+
+---
+
 ## The tools
 
 | File | What it is |
@@ -541,3 +566,6 @@ many table-level SELECT/UPDATE grants remain outside `alembic_version`.
 
 Added 2026-08-21 after migration `a1c4e8b60d37` (archive framework: seven FKs
 plus a `students` backfill) could not run under the workflow identity.
+`d3f8b2a70c19` — the eighth archivable table, `student_eligibilities` — runs the
+same way and for the same reason: one more FK onto a populated table. It needs
+no temporary grants, because it adds no backfill.

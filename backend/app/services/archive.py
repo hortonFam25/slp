@@ -34,11 +34,11 @@ the change is not a like-for-like swap and every caller has to be re-reasoned.
 
 * **student** -> the student, their IEP goals, the objectives under those
   goals, the progress entries under those objectives, their therapy sessions,
-  and their appointments.
+  their appointments, and their eligibility determinations.
 
   NOT `block_assignments`. They are join rows between a student and a group
   time block, they carry no clinical content, and they have no archive columns
-  (the migration adds the pair to seven tables; this is not one of them). An
+  (the migrations add the pair to eight tables; this is not one of them). An
   archived student's assignment row survives untouched and is simply not
   reachable through a default-filtered query, because both the student and any
   appointment the assignment produced are archived. Restoring the student
@@ -76,6 +76,17 @@ the change is not a like-for-like swap and every caller has to be re-reasoned.
 * **time_block** -> itself, its appointments and its therapy sessions --
   exactly the set `TimeBlockRepository.delete_time_block` walked. Its
   `block_assignments` are left alone for the reason given under **student**.
+
+* **student_eligibility** -> itself. A leaf, and the newest member of this
+  list: `EligibilityRepository.delete_student_eligibility` was the last hard
+  DELETE of clinical data left in the tree. An eligibility determination is a
+  legal finding about a child, so "we took it off the record" and "it never
+  happened" have to stay tellable apart.
+
+  NOT `eligibility_categories`. That is a shared lookup table -- the same
+  fourteen rows every child's eligibility points at -- and archiving one
+  child's determination must not touch a category the rest of the caseload
+  uses. It has no archive columns, deliberately.
 
 DOUBLE ARCHIVE is an ERROR, not a no-op: `archive()` on an already-archived
 root raises `AlreadyArchivedError` naming the event that owns it. A silent
@@ -120,6 +131,7 @@ from app.models.archive_event import (
     ENTITY_OBJECTIVE,
     ENTITY_PROGRESS_ENTRY,
     ENTITY_STUDENT,
+    ENTITY_STUDENT_ELIGIBILITY,
     ENTITY_THERAPY_SESSION,
     ENTITY_TIME_BLOCK,
     ArchiveEvent,
@@ -128,6 +140,7 @@ from app.models.goal_objective import GoalObjective
 from app.models.iep_goal import IEPGoal
 from app.models.objective_progress_entry import ObjectiveProgressEntry
 from app.models.student import Student
+from app.models.student_eligibility import StudentEligibility
 from app.models.therapy_session import TherapySession
 from app.models.time_block import TimeBlock
 
@@ -142,6 +155,7 @@ ENTITY_MODELS: dict[str, type] = {
     ENTITY_THERAPY_SESSION: TherapySession,
     ENTITY_APPOINTMENT: Appointment,
     ENTITY_TIME_BLOCK: TimeBlock,
+    ENTITY_STUDENT_ELIGIBILITY: StudentEligibility,
 }
 
 # The reverse map, used to label counts and to walk every archivable table when
@@ -163,6 +177,7 @@ COUNT_LABELS: dict[str, str] = {
     ENTITY_THERAPY_SESSION: "therapySessions",
     ENTITY_APPOINTMENT: "appointments",
     ENTITY_TIME_BLOCK: "timeBlocks",
+    ENTITY_STUDENT_ELIGIBILITY: "studentEligibilities",
 }
 
 # Human labels for error messages. "goal_objective" is what the table is
@@ -175,6 +190,7 @@ ENTITY_LABELS: dict[str, str] = {
     ENTITY_THERAPY_SESSION: "therapy session",
     ENTITY_APPOINTMENT: "appointment",
     ENTITY_TIME_BLOCK: "time block",
+    ENTITY_STUDENT_ELIGIBILITY: "student eligibility",
 }
 
 # SQL Server refuses a statement with more than 2100 bind parameters, and an
@@ -270,7 +286,12 @@ def root_student_id(db: Session, entity_type: str, entity_id: int) -> Optional[i
     row = load_entity(db, entity_type, entity_id)
     if entity_type == ENTITY_STUDENT:
         return row.id
-    if entity_type in (ENTITY_GOAL, ENTITY_THERAPY_SESSION, ENTITY_APPOINTMENT):
+    if entity_type in (
+        ENTITY_GOAL,
+        ENTITY_THERAPY_SESSION,
+        ENTITY_APPOINTMENT,
+        ENTITY_STUDENT_ELIGIBILITY,
+    ):
         return row.student_id
     if entity_type == ENTITY_OBJECTIVE:
         return row.goal.student_id if row.goal else None
@@ -310,6 +331,14 @@ def cascade_targets(
             (ObjectiveProgressEntry, entry_ids),
             (TherapySession, _ids(db, TherapySession, TherapySession.student_id == entity_id)),
             (Appointment, _ids(db, Appointment, Appointment.student_id == entity_id)),
+            (
+                StudentEligibility,
+                _ids(
+                    db,
+                    StudentEligibility,
+                    StudentEligibility.student_id == entity_id,
+                ),
+            ),
         ]
 
     if entity_type == ENTITY_GOAL:
@@ -338,6 +367,12 @@ def cascade_targets(
 
     if entity_type == ENTITY_PROGRESS_ENTRY:
         return [(ObjectiveProgressEntry, [entity_id])]
+
+    if entity_type == ENTITY_STUDENT_ELIGIBILITY:
+        # A leaf. Nothing hangs off an eligibility row: the category it points
+        # at is a shared lookup, not a child, and archiving one child's
+        # eligibility must not touch the category every other child uses.
+        return [(StudentEligibility, [entity_id])]
 
     if entity_type == ENTITY_THERAPY_SESSION:
         # Itself only. The progress entries logged during it belong to an
@@ -376,7 +411,12 @@ def _parent_chain(db: Session, entity_type: str, entity_id: int) -> list[tuple[s
     if entity_type in (ENTITY_STUDENT, ENTITY_TIME_BLOCK):
         return []
 
-    if entity_type in (ENTITY_GOAL, ENTITY_THERAPY_SESSION, ENTITY_APPOINTMENT):
+    if entity_type in (
+        ENTITY_GOAL,
+        ENTITY_THERAPY_SESSION,
+        ENTITY_APPOINTMENT,
+        ENTITY_STUDENT_ELIGIBILITY,
+    ):
         student = db.query(Student).filter(Student.id == row.student_id).first()
         return [(ENTITY_STUDENT, student)] if student else []
 
@@ -738,7 +778,12 @@ def list_archived(
             return []
         if entity_type == ENTITY_STUDENT:
             query = query.filter(Student.id.in_(allowed_student_ids))
-        elif entity_type in (ENTITY_GOAL, ENTITY_THERAPY_SESSION, ENTITY_APPOINTMENT):
+        elif entity_type in (
+            ENTITY_GOAL,
+            ENTITY_THERAPY_SESSION,
+            ENTITY_APPOINTMENT,
+            ENTITY_STUDENT_ELIGIBILITY,
+        ):
             query = query.filter(model.student_id.in_(allowed_student_ids))
         elif entity_type == ENTITY_OBJECTIVE:
             query = query.join(IEPGoal, GoalObjective.goal_id == IEPGoal.id).filter(
