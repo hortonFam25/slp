@@ -405,3 +405,28 @@ directory. `script_location` is relative; run it from `backend/app`.
 
 **`Database is paused` / error 40613** — Azure SQL serverless resuming. Retry;
 the app's engine already has retry logic for it.
+
+## Operator-run migrations (`backend/scripts/db_migrate.py`)
+
+The workflow identity is schema-only on purpose, so two ordinary kinds of
+migration fail under it: data backfills (`UPDATE ... SET new_col`) and adding
+a FOREIGN KEY to an existing table (SQL Server validates existing rows, which
+needs `SELECT` on that table). Rather than widening the robot's rights, those
+run as the human operator's Entra identity (server admin) via
+`az account get-access-token` — no passwords, no grants, no MFA round-trips:
+
+    backend/venv/Scripts/python.exe backend/scripts/db_migrate.py upgrade --target dev
+    backend/venv/Scripts/python.exe backend/scripts/db_migrate.py upgrade --target prod
+    backend/venv/Scripts/python.exe backend/scripts/db_migrate.py current --target prod
+    backend/venv/Scripts/python.exe backend/scripts/db_migrate.py revoke-temp-grants --target prod
+
+`upgrade` lists the pending revisions and then runs a static guard over each
+one's `upgrade()`: any `drop_table`, `drop_column`, `drop_index`,
+`drop_constraint`, `DELETE FROM`, `TRUNCATE` or `DROP ...` makes it refuse.
+There is no override flag — destructive migrations are run by a person, by
+design. `revoke-temp-grants` only ever removes permissions from the workflow
+identity (the temporary table grants a backfill once needed), and reports how
+many table-level SELECT/UPDATE grants remain outside `alembic_version`.
+
+Added 2026-08-21 after migration `a1c4e8b60d37` (archive framework: seven FKs
+plus a `students` backfill) could not run under the workflow identity.
