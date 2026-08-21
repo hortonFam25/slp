@@ -617,12 +617,11 @@ EXEMPT_METHODS = {
     ("TherapySessionRepository", "get_objective_history"),  # asserted below
     ("TherapySessionRepository", "get_goal_history"),  # asserted below
     ("TherapySessionRepository", "get_active_sessions"),  # asserted below
-    # Carries the archive filter (see the method), but cannot be CALLED: its
-    # slot loop does `current_time.replace(minute=minute + duration)` and dies
-    # with "minute must be in 0..59" on the first iteration past :29, for every
-    # input. That is a pre-existing bug, older than this feature and unrelated
-    # to it, so it is not fixed here -- but it is the reason there is no
-    # behavioural assertion for this method.
+    # asserted below. (It used to be here with no assertion at all, because the
+    # method raised "minute must be in 0..59" on every input -- its slot loop
+    # stepped the clock with `replace(minute=...)`. That is fixed; the loop is
+    # `timedelta` now, and the filter is exercised for real. The full behaviour
+    # of the method lives in tests/test_available_time_slots.py.)
     ("AppointmentRepository", "get_available_time_slots"),
     ("AppointmentRepository", "check_time_conflict"),  # asserted below
     ("TimeBlockRepository", "check_teacher_conflict"),  # asserted below
@@ -833,6 +832,19 @@ def test_archived_appointments_do_not_hold_their_slot(db, world):
         start_datetime=active.start_datetime,
         end_datetime=active.end_datetime,
     ) is True
+
+    # The same decision on the other scheduling predicate: the archived
+    # appointment's start comes back as an offered slot, the active one's does
+    # not. The fixture books 15:00-15:30 (active) and 16:00-16:30 (archived).
+    slots = repo.get_available_time_slots(
+        student_id=world["active_student"],
+        target_date=active.start_datetime.date(),
+        duration_minutes=30,
+        start_hour=15,
+        end_hour=17,
+    )
+    assert archived.start_datetime in slots
+    assert active.start_datetime not in slots
 
 
 def test_archived_time_blocks_do_not_hold_the_teacher(db, world):
