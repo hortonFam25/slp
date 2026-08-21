@@ -7,6 +7,7 @@ import { Toaster } from 'react-hot-toast';
 import { MsalProvider } from '@azure/msal-react';
 import { PublicClientApplication, EventType, AccountInfo } from '@azure/msal-browser';
 import App from './App';
+import { dbWakeAwareRetry, dbWakeAwareRetryDelay } from './lib/db-wake/queryRetry';
 import { capturePendingConsent } from './lib/auth/pendingConsent';
 import './index.css';
 
@@ -54,7 +55,13 @@ const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
       refetchOnWindowFocus: false,
-      retry: 1,
+      // Was `retry: 1`. The axios db-wake interceptor now owns retries for a
+      // paused database — it absorbs those failures entirely, so a query only
+      // ever sees an error the interceptor already gave up on or deliberately
+      // declined. Retrying those here would stack a second storm on top of a
+      // two-minute wait. lib/db-wake/queryRetry.ts documents the interplay.
+      retry: dbWakeAwareRetry,
+      retryDelay: dbWakeAwareRetryDelay,
     },
   },
 });

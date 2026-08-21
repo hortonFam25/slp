@@ -3,6 +3,9 @@ import { ApiError, handleApiError } from './errors';
 import { apiLogger } from '../utils/logger';
 import type { IPublicClientApplication } from '@azure/msal-browser';
 import { appScopes } from '../auth/authConfig';
+// Imported from the module, not from `../db-wake` — the barrel also exports the
+// pre-warm hook, which imports this file, and that would be a cycle.
+import { installDbWakeInterceptor } from '../db-wake/interceptor';
 
 // Create axios instance with default config
 export const apiClient = axios.create({
@@ -65,6 +68,18 @@ apiClient.interceptors.request.use(
     return Promise.reject(error);
   }
 );
+
+// Azure SQL Serverless auto-pauses after 60 idle minutes, and the first request
+// afterwards used to surface to the user as "Network Error". This interceptor
+// absorbs that: it waits the database out and re-sends, so callers below only
+// ever see a request that took a while.
+//
+// REGISTERED FIRST, AND THAT IS LOAD-BEARING. Axios runs response interceptors
+// in registration order, and the handler below replaces the raw AxiosError with
+// an ApiError — which has no `config`, so a retry could not be built from it.
+// This one has to see the error while it is still re-sendable; anything it
+// declines falls straight through to the ApiError mapping unchanged.
+installDbWakeInterceptor(apiClient);
 
 // Response interceptor - for global error handling, response transformation
 apiClient.interceptors.response.use(

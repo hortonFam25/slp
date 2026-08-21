@@ -1,5 +1,7 @@
 import { AxiosError } from 'axios';
 
+import { DB_WAKE_EXHAUSTED } from '../db-wake/policy';
+
 export class ApiError extends Error {
   public status: number;
   public details?: any;
@@ -15,8 +17,19 @@ export class ApiError extends Error {
     const status = error.response?.status || 500;
     const message = error.response?.data?.detail || error.message || 'An unknown error occurred';
     const details = error.response?.data;
-    
-    return new ApiError(message, status, details);
+
+    const apiError = new ApiError(message, status, details);
+
+    // Carry the db-wake interceptor's "already waited two minutes on this"
+    // marker across the AxiosError -> ApiError boundary. Without it the
+    // TanStack Query retry rule cannot tell an untried failure from an
+    // exhausted one, and would start a second retry storm behind the first.
+    // See lib/db-wake/queryRetry.ts.
+    if ((error as unknown as Record<string, unknown>)[DB_WAKE_EXHAUSTED]) {
+      (apiError as unknown as Record<string, unknown>)[DB_WAKE_EXHAUSTED] = true;
+    }
+
+    return apiError;
   }
 
   static isApiError(error: any): error is ApiError {

@@ -6,24 +6,14 @@ import logging
 import functools
 from typing import Callable, Any
 
+from app.db.pause_signatures import is_serverless_pause_error
+
 logger = logging.getLogger(__name__)
 
-
-def _is_serverless_pause_error(error: Exception) -> bool:
-    """Check if the error is related to Azure SQL serverless being paused."""
-    error_str = str(error).lower()
-    return any(keyword in error_str for keyword in [
-        "database is currently unavailable",
-        "database is being started", 
-        "database is paused",
-        "cannot connect to database", 
-        "timeout expired",
-        "database startup is in progress",
-        "40613",  # Azure SQL error code for paused database
-        "40501",  # Azure SQL error code for service busy
-        "connection is not available",
-        "the database is currently unavailable",
-    ])
+# This module used to carry its own copy of the pause signatures, and that copy
+# had already drifted from the one in app.db.database. Both now read the single
+# list in app.db.pause_signatures; the alias keeps this module's private name.
+_is_serverless_pause_error = is_serverless_pause_error
 
 
 def db_retry(

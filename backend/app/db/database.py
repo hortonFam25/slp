@@ -10,6 +10,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import sessionmaker, Session
 
 from app.settings import settings
+from app.db.pause_signatures import is_serverless_pause_error
 
 logger = logging.getLogger(__name__)
 
@@ -25,19 +26,11 @@ def set_sqlite_pragma(dbapi_connection, connection_record):  # type: ignore[no-r
         pass
 
 
-def _is_serverless_pause_error(error: Exception) -> bool:
-    """Check if the error is related to Azure SQL serverless being paused."""
-    error_str = str(error).lower()
-    return any(keyword in error_str for keyword in [
-        "database is currently unavailable",
-        "database is being started", 
-        "database is paused",
-        "cannot connect to database", 
-        "timeout expired",
-        "database startup is in progress",
-        "40613",  # Azure SQL error code for paused database
-        "40501",  # Azure SQL error code for service busy
-    ])
+# The pause signatures used to live here as a private copy. They now live in
+# app.db.pause_signatures so the request-level 503 handler and the readiness
+# probe classify a failure exactly the way these retry loops do. The alias keeps
+# the old private name working for anything that still reaches for it.
+_is_serverless_pause_error = is_serverless_pause_error
 
 
 def _create_engine_with_retry(max_retry_duration: int = 300, initial_delay: float = 1.0):
@@ -134,6 +127,78 @@ def _create_engine_with_retry(max_retry_duration: int = 300, initial_delay: floa
 
 engine = _create_engine_with_retry()
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+
+# ---------------------------------------------------------------------------
+# The readiness probe's own engine.
+# ---------------------------------------------------------------------------
+# `engine` above is tuned to *survive* a pause: a 60-second login timeout, a
+# connection pool, pool_pre_ping. That is right for real work and exactly wrong
+# for /api/health/ready, which the browser polls every 5 seconds and which has
+# to answer "still asleep" in a couple of seconds rather than block for a minute
+# holding a worker.
+#
+# So the probe gets its own engine: same URL, NullPool (never hand a probe
+# connection to anyone else, never keep one), and a short login timeout so a
+# paused database comes back as an error we can classify instead of a hang.
+# Built lazily and cached — create_engine() does not connect, but there is no
+# reason to build it in a process that never probes.
+PROBE_CONNECT_TIMEOUT_SECONDS = 3
+PROBE_STATEMENT_TIMEOUT_SECONDS = 3
+
+_probe_engine: Engine | None = None
+
+
+def get_probe_engine() -> Engine:
+    """A short-timeout, unpooled engine for liveness/readiness probing only."""
+    global _probe_engine
+    if _probe_engine is not None:
+        return _probe_engine
+
+    from sqlalchemy.pool import NullPool
+
+    connection_string = settings.sql_server_connection_string or "sqlite:///./local.db"
+    connect_args: dict = {}
+    if "sqlite" in connection_string:
+        connect_args = {"timeout": PROBE_CONNECT_TIMEOUT_SECONDS}
+    elif "database.windows.net" in connection_string:
+        connect_args = {
+            "timeout": PROBE_CONNECT_TIMEOUT_SECONDS,
+            "command_timeout": PROBE_CONNECT_TIMEOUT_SECONDS,
+        }
+
+    # No implicit_returning=False here, unlike the main engine: that flag exists
+    # to keep INSERT..OUTPUT away from trigger-bearing tables, and this engine
+    # only ever runs SELECT 1.
+    _probe_engine = create_engine(
+        connection_string,
+        poolclass=NullPool,
+        connect_args=connect_args,
+        echo=False,
+    )
+    return _probe_engine
+
+
+def probe_database() -> None:
+    """Run the cheapest possible query, fast. Raises on any failure.
+
+    The caller classifies the exception with
+    ``app.db.pause_signatures.is_serverless_pause_error``; this function's only
+    job is to fail *quickly* rather than to fail informatively.
+    """
+    from sqlalchemy import text
+
+    with get_probe_engine().connect() as conn:
+        # pyodbc puts the statement timeout on the connection object, and there
+        # is no dialect-neutral way to ask for one. Best effort: every driver
+        # that does not support it simply does not get one, and the short login
+        # timeout still bounds the common case (a paused DB fails at connect).
+        raw = getattr(conn.connection, "dbapi_connection", conn.connection)
+        try:
+            raw.timeout = PROBE_STATEMENT_TIMEOUT_SECONDS
+        except Exception:
+            pass
+        conn.execute(text("SELECT 1"))
 
 
 @contextmanager
