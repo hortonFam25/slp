@@ -21,11 +21,19 @@ import Login from './features/auth/Login';
 import Chat from './features/chat/Chat';
 import ConnectAuthorize from './features/connect/ConnectAuthorize';
 import { readPendingConsent, CONSENT_PATH } from './lib/auth/pendingConsent';
+import { DatabaseWakingOverlay, useDbWakePrewarm } from './lib/db-wake';
 
 export default function App() {
   const mode = useThemeStore((s) => s.mode);
   const { inProgress } = useMsal();
   const isAuthenticated = useIsAuthenticated();
+
+  // Azure SQL Serverless auto-pauses after 60 idle minutes. Ask it to get up as
+  // soon as we have a signed-in user, so the wait is explained by the overlay
+  // before the dashboard's first query runs into it. Gated on authentication:
+  // an unauthenticated probe would 401, and nothing may interrupt the MSAL
+  // redirect dance below.
+  useDbWakePrewarm(isAuthenticated);
 
   const theme = useMemo(
     () =>
@@ -77,6 +85,12 @@ export default function App() {
   return (
     <ThemeProvider theme={theme}>
       <CssBaseline />
+      {/* Global, and mounted here rather than inside AppShell so it also covers
+          the full-screen therapy session route, which renders outside the
+          shell. Renders nothing unless the database is actually asleep, and is
+          gated on authentication so it can never appear over the login or
+          consent screens. */}
+      {isAuthenticated && <DatabaseWakingOverlay />}
       <Routes>
         {/* Unauthenticated routes */}
         <Route path="/login" element={<Login />} />

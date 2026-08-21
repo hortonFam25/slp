@@ -327,6 +327,110 @@ only, as always.
 
 ---
 
+## Serverless auto-pause: the `DB_WAKING` contract
+
+`slpdb_2` runs on the Azure SQL **Serverless** tier, which pauses its compute
+after 60 idle minutes. That is deliberate — it is most of the reason the bill is
+what it is — but it means the first request after a quiet period (overnight, a
+weekend, a long IEP meeting) waits **30-60 seconds** while compute resumes.
+
+Before this was handled, that wait ended as an unhandled `OperationalError`: a
+500 with no readable body, which the browser reported to a therapist as
+`Network Error` next to an instruction to refresh. Refreshing restarted the
+clock. The pause is now a first-class state that the whole stack agrees on.
+
+### The wire contract
+
+One string. Everything keys off it, and nothing keys off the prose:
+
+```http
+HTTP/1.1 503 Service Unavailable
+Retry-After: 5
+
+{"detail": "Database is waking up", "code": "DB_WAKING"}
+```
+
+`/api/health/ready` uses the same `code` in its own shape:
+
+| Endpoint | Awake | Waking | Otherwise broken |
+|---|---|---|---|
+| `GET /api/health/live` | `200 {"live": true}` | `200 {"live": true}` | `200 {"live": true}` |
+| `GET /api/health/ready` | `200 {"ready": true, "database": "connected"}` | `503 {"ready": false, "code": "DB_WAKING", "database": "waking"}` + `Retry-After: 5` | `503 {"ready": false, "database": "disconnected"}` |
+
+`/live` is database-free and must stay that way: it is what
+`.github/workflows/deploy.yml` polls to decide a zip deploy landed, and what
+App Service would use to decide whether to recycle a worker. A paused database
+is not a dead process, and a query in that endpoint would turn every auto-pause
+into a restart loop.
+
+The third column matters as much as the second. A failure that is *not* a pause
+deliberately carries **no** `code`, so a mistyped connection string cannot park
+the UI in a wake-up loop waiting for itself to heal.
+
+### Where the decision is made
+
+| File | Role |
+|---|---|
+| [`backend/app/db/pause_signatures.py`](../backend/app/db/pause_signatures.py) | The single list of driver messages that mean "resuming". Engine retry, `@db_retry`, the 503 handler and the readiness probe all import it. Both retry modules used to carry their own copies, and the copies had drifted. |
+| [`backend/app/errors/db_waking.py`](../backend/app/errors/db_waking.py) | The FastAPI exception handler. Registered on `SQLAlchemyError`, because Starlette resolves handlers by walking `__mro__`. Pause → 503 above. **Anything else is re-raised untouched.** |
+| [`backend/app/db/database.py`](../backend/app/db/database.py) | `get_probe_engine()` / `probe_database()` — a second, unpooled engine with a 3-second login timeout, used *only* by `/ready`. The main engine's 60-second patience is right for real work and useless for a probe the browser polls every 5 seconds. |
+| [`frontend/src/lib/db-wake/`](../frontend/src/lib/db-wake/) | The client half: policy, store, axios interceptor, overlay, pre-warm. |
+
+Logging is at **warning** level and derives nothing from the driver's message —
+that text carries the SQL and its bound parameters, which is patient data. What
+gets logged is the matched signature (a constant), the exception class name, and
+the matched *route template* (`/api/students/{student_id}`, never
+`/api/students/4471`).
+
+### What the browser does about it
+
+The axios interceptor in `lib/db-wake/interceptor.ts` absorbs the wait, so
+callers never see it — a `useQuery` hook gets a promise that took 40 seconds and
+then resolved.
+
+**Backoff:** 2s, 4s, 8s, then 10s repeating, up to a **120-second** total budget
+per request (13 attempts). Front-loaded because a briefly-idle database answers
+almost at once; flat afterwards because a real resume takes 30-60 seconds and
+doubling past 10s only adds dead air. On exhaustion the *original* error is
+rejected, so existing error handling is unchanged.
+
+**Idempotency — the one decision worth understanding:**
+
+* A **`DB_WAKING` 503 is retried for every method, POST and DELETE included.**
+  The backend raises it while acquiring the connection, so the statement never
+  reached the server and there is nothing half-written behind it. A backend test
+  (`test_pause_on_a_write_is_also_503_db_waking`) pins that property precisely
+  because this client decision rests on it.
+* A **raw network error** promises nothing — the request may have been processed
+  and only the response lost. So GET/HEAD/OPTIONS retry automatically, and
+  **writes never do.** They raise the overlay with a "Try again" button and copy
+  that says the change may already have been saved. Re-sending a write is a
+  decision about somebody's data, and it belongs to the person who made it.
+
+**Pre-warm:** on mount, once authenticated, `useDbWakePrewarm` pings
+`/api/health/ready` once and — if the answer is `DB_WAKING` — shows the overlay
+and polls every 5 seconds. Users see the honest state before their first real
+request runs into it. It is gated on authentication so it can never appear over
+the MSAL sign-in redirect.
+
+**Interplay with TanStack Query:** the two retry layers are not peers. The
+interceptor owns wake-up retries; Query only ever sees errors the interceptor
+already spent its budget on or deliberately declined. `dbWakeAwareRetry`
+(`lib/db-wake/queryRetry.ts`) therefore refuses to retry anything carrying the
+interceptor's `__dbWakeExhausted` marker — otherwise N mounted queries would
+each launch a second storm behind a two-minute wait — and never retries a 4xx.
+Everything else gets two tries with 1s/2s backoff.
+
+### Known sharp edge
+
+`timeout expired` is one of the pause signatures, inherited from the retry loops
+that predate this. It means a genuinely slow query that exhausts its own timeout
+is *also* reported as `DB_WAKING`. The blast radius is bounded — the client
+budget is 120 seconds and then the real error surfaces — but if a slow endpoint
+ever starts showing the wake-up overlay, that signature is why.
+
+---
+
 ## Audit trail
 
 `therapy_session_audit_log` is the history of edits to therapy sessions and
@@ -376,6 +480,7 @@ again.
 | [`.github/workflows/migrate.yml`](../.github/workflows/migrate.yml) | The dispatch-only migration workflow. |
 | [`backend/tests/test_seed_dev.py`](../backend/tests/test_seed_dev.py) | The gate: the guards refuse production, the catalog-only rule holds across the whole module, and the seeder runs end to end on sqlite. |
 | [`backend/tests/test_audit_log_migration.py`](../backend/tests/test_audit_log_migration.py) | Covers `b4e7a1c93d20`: the ENABLE TRIGGER branch is driven through a stand-in bind, since no test may touch SQL Server. |
+| [`backend/tests/test_db_waking.py`](../backend/tests/test_db_waking.py) | Pins the `DB_WAKING` contract. The pause is synthesised from a real Azure 40613 message, so no test needs a paused database. |
 
 ---
 
@@ -403,8 +508,14 @@ directory. `script_location` is relative; run it from `backend/app`.
 **`near "(": syntax error`** on sqlite — something ran `create_all` without the
 `GETDATE()` shim. Use `seed_dev.build_sqlite_engine()` or the test harness.
 
-**`Database is paused` / error 40613** — Azure SQL serverless resuming. Retry;
-the app's engine already has retry logic for it.
+**`Database is paused` / error 40613** — Azure SQL serverless resuming. Expected,
+and handled end to end: the API answers `503 {"code": "DB_WAKING"}` and the
+browser waits it out behind an overlay. See
+[Serverless auto-pause](#serverless-auto-pause-the-db_waking-contract).
+
+**The wake-up overlay appears on an endpoint that is merely slow** — `timeout
+expired` is one of the pause signatures. See the "Known sharp edge" note in the
+same section.
 
 ## Operator-run migrations (`backend/scripts/db_migrate.py`)
 

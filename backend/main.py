@@ -8,6 +8,7 @@ from app.routers import archive
 from app.routers import oauth_public
 from app.routers import import_upload
 from app.db import database
+from app.errors import register_db_waking_handler
 from app.mcp import McpAuthMiddleware, mcp_asgi_app, mcp_server
 
 
@@ -36,6 +37,13 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="SLP Pro API", version="0.1.0", lifespan=lifespan)
+
+# Azure SQL Serverless auto-pauses after 60 idle minutes, and the first request
+# after that used to die as an unhandled OperationalError — a 500 the browser
+# reported as "Network Error". This turns the pause, and only the pause, into a
+# 503 {"code": "DB_WAKING"} the frontend knows how to wait out. Everything else
+# raised by SQLAlchemy keeps its current behaviour. See app/errors/db_waking.py.
+register_db_waking_handler(app)
 
 app.add_middleware(
     CORSMiddleware,
