@@ -108,6 +108,32 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
+      # Every setting the API needs must be a real App Setting: deploy.yml
+      # excludes .env* from the zip on purpose, and on 2026-08-21 four keys that
+      # had only ever lived in backend/.env turned out to be missing on prod
+      # (nobody was admin; the AI chat had no key). Names only -- values are
+      # never read or logged. Keep in sync with docs/CICD.md.
+      - name: Gate — required App Settings exist on slppro-api
+        env:
+          REQUIRED_APP_SETTINGS: >-
+            ENVIRONMENT AUTH_REQUIRE_BEARER AAD_TENANT_ID AAD_CLIENT_ID
+            SQL_SERVER_CONNECTION_STRING SLP_PUBLIC_ORIGIN SLP_FRONTEND_ORIGIN
+            ACCESS_CONTROL_MODE ACCESS_ADMIN_EMAILS
+            ACCESS_FULL_STUDENT_ACCESS_EMAILS OPENAI_API_KEY
+        run: |
+          set -euo pipefail
+          present=$(az webapp config appsettings list                       -g "$AZ_RESOURCE_GROUP" -n "$AZ_BACKEND_APP"                       --query "[].name" -o tsv)
+          missing=()
+          for key in $REQUIRED_APP_SETTINGS; do
+            grep -qx "$key" <<<"$present" || missing+=("$key")
+          done
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::Missing App Settings on $AZ_BACKEND_APP: ${missing[*]}"
+            echo "Set them with: az webapp config appsettings set -g $AZ_RESOURCE_GROUP -n $AZ_BACKEND_APP --settings KEY=VALUE ..."
+            exit 1
+          fi
+          echo "all $(wc -w <<<"$REQUIRED_APP_SETTINGS") required App Settings present"
+
       - name: Deploy the zip to slppro-api
         run: |
           az webapp deployment source config-zip \
