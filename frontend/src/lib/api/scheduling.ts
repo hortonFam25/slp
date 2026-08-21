@@ -1,4 +1,5 @@
 import { BaseApiService } from './base';
+import type { ArchiveResponse } from './archive';
 
 // Types for scheduling entities
 export interface Appointment {
@@ -155,7 +156,7 @@ export interface SeriesPatternUpdate {
   }>;
 }
 
-export interface SeriesDeleteResponse {
+export interface SeriesDeleteResponse extends ArchiveResponse {
   message: string;
 }
 
@@ -405,8 +406,11 @@ class SchedulingApiService extends BaseApiService {
     return this.put<Appointment>(`/appointments/${id}`, data);
   }
 
-  async deleteAppointment(id: number): Promise<void> {
-    return this.delete<void>(`/appointments/${id}`);
+  // ARCHIVES the appointment and its therapy session. Same verb, same path,
+  // and the same two 400s as before (a completed or in-progress session, or a
+  // past appointment with no session, still refuse).
+  async deleteAppointment(id: number): Promise<ArchiveResponse> {
+    return this.delete<ArchiveResponse>(`/appointments/${id}`);
   }
 
   async getStudentAppointments(
@@ -484,8 +488,11 @@ class SchedulingApiService extends BaseApiService {
     return this.put<TimeBlock>(`/time-blocks/${id}`, data);
   }
 
-  async deleteTimeBlock(id: number): Promise<void> {
-    return this.delete<void>(`/time-blocks/${id}`);
+  // ARCHIVES the block with its appointments and therapy sessions. Its student
+  // assignments are left in place, which is what lets a restore hand the group
+  // back whole.
+  async deleteTimeBlock(id: number): Promise<ArchiveResponse> {
+    return this.delete<ArchiveResponse>(`/time-blocks/${id}`);
   }
 
   async assignStudentToBlock(timeBlockId: number, studentId: number): Promise<void> {

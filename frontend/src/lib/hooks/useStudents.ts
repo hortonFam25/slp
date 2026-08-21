@@ -41,14 +41,20 @@ export function useStudents(filters?: StudentsFilters) {
     }
   };
 
+  // ARCHIVES via `DELETE /api/students/{id}`, which no longer deletes anything.
+  // The Students page uses `archiveStudent` below instead -- the two routes do
+  // the same thing now, so the UI offers one button -- but this is kept because
+  // the archive response carries `archiveEventId`, which is the id an undo is
+  // built from when a caller does not want the PUT route's student payload.
   const deleteStudent = async (id: number) => {
     try {
       setError(null);
-      await studentsApi.deleteStudent(id);
-      // Remove from local state for immediate UI update
+      const result = await studentsApi.deleteStudent(id);
+      // Drop from local state: archived students are not in the default list.
       setStudents(prev => prev.filter(student => student.id !== id));
+      return result;
     } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : 'Failed to delete student';
+      const errorMessage = err instanceof Error ? err.message : 'Failed to archive student';
       setError(errorMessage);
       throw new Error(errorMessage);
     }

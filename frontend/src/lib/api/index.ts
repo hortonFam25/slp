@@ -100,6 +100,19 @@ export type {
   SessionStatistics
 } from './therapySessions';
 
+export { archiveApi, ARCHIVABLE_ENTITY_TYPES, ENTITY_LABELS, CONTENT_LABELS } from './archive';
+export type {
+  ArchivableEntityType,
+  ArchiveResponse,
+  ArchiveEventSummary,
+  ArchiveEventsFilters,
+  ArchivedEntity,
+  RestoreResult
+} from './archive';
+
+export { apiTokensApi, MAX_MANUAL_TOKENS, isTokenLimitError, tokenLimitMessage } from './apiTokens';
+export type { ApiToken, ApiTokenCreated, ApiTokenKind } from './apiTokens';
+
 // Future API services will be exported here:
 // export { assessmentsApi } from './assessments';
 // export { progressApi } from './progress';
@@ -115,6 +128,12 @@ export const api = {
   teachers: teachersApi,
   scheduling: schedulingApi,
   therapySessions: therapySessionsApi,
+  // NOT extended with `archive` / `apiTokens`. Every entry in this object is
+  // already a `TS2304: Cannot find name` -- `export { x } from` re-exports
+  // without binding `x` locally -- and adding a line here would add another
+  // pre-existing-shaped error rather than a usable member. Import
+  // `archiveApi` / `apiTokensApi` from their modules (or the named re-exports
+  // above) instead.
   // assessments: assessmentsApi,
   // progress: progressApi,
   // services: servicesApi,

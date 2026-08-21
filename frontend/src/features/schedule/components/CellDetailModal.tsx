@@ -26,7 +26,7 @@ import {
   AccessTime,
   School,
   PersonOutline,
-  Delete,
+  Archive as ArchiveIcon,
   Lock
 } from '@mui/icons-material';
 import { format, addMinutes, isSameDay, startOfDay, setHours, setMinutes, differenceInMinutes } from 'date-fns';
@@ -40,6 +40,7 @@ import { EditTimeBlockModal } from './EditTimeBlockModal';
 import { SeriesActionDialog } from './SeriesActionDialog';
 import { ProtectedAppointmentModal } from './ProtectedAppointmentModal';
 import { ConfirmationModal } from '../../../components/ui/ConfirmationModal';
+import { useArchiveWithUndo, archiveMessage, archiveTitle } from '../../../lib/archive';
 
 // Helper function to check if appointment can be modified
 const canModifyAppointment = (appointment: AppointmentSummary): { canModify: boolean; reason?: string } => {
@@ -135,8 +136,9 @@ export function CellDetailModal({
   
   // API hooks for direct therapy session creation
   const startSessionMutation = useStartTherapySession();
+  const archiveWithUndo = useArchiveWithUndo();
   const navigate = useNavigate();
-  
+
   // State for edit modals
   const [editAppointmentModalOpen, setEditAppointmentModalOpen] = useState(false);
   const [editTimeBlockModalOpen, setEditTimeBlockModalOpen] = useState(false);
@@ -475,7 +477,7 @@ export function CellDetailModal({
       // Note: The parent handlers will refresh the data, so the modal will re-render
       // with updated data automatically
     } catch (error) {
-      console.error('Delete failed:', error);
+      console.error('Archive failed:', error);
       setDeleteLoading(false);
       // Keep the confirmation modal open to show the error or let user retry
     }
@@ -499,21 +501,25 @@ export function CellDetailModal({
   };
 
   const handleSeriesDelete = async () => {
-    if (!appointmentForSeriesAction?.series_id) return;
-    
+    const appointment = appointmentForSeriesAction;
+    if (!appointment?.series_id) return;
+
     try {
       const { schedulingApi } = await import('../../../lib/api/scheduling');
-      await schedulingApi.deleteAppointmentSeries(appointmentForSeriesAction.series_id);
-      console.log('✅ Series deleted successfully');
-      
-      // Trigger data refresh without individual appointment deletion
-      if (onSeriesUpdate) {
-        await onSeriesUpdate();
-      }
-      
+      // The WHOLE series archives under ONE event, so one undo brings the whole
+      // thing back rather than N undos that could be half-finished.
+      await archiveWithUndo({
+        entity: 'appointment',
+        name: appointment.student_name
+          ? `${appointment.student_name}'s series`
+          : 'appointment series',
+        archive: () => schedulingApi.deleteAppointmentSeries(appointment.series_id as string),
+        onChanged: () => onSeriesUpdate?.(),
+      });
+
       handleSeriesActionClose();
     } catch (error) {
-      console.error('Failed to delete appointment series:', error);
+      console.error('Failed to archive appointment series:', error);
     }
   };
   
@@ -770,23 +776,24 @@ export function CellDetailModal({
                           </IconButton>
                         </Tooltip>
                         
-                        <Tooltip title={canModify ? "Delete Appointment" : `Cannot delete: ${modificationCheck.reason}`}>
-                          <IconButton 
+                        <Tooltip title={canModify ? "Archive Appointment" : `Cannot archive: ${modificationCheck.reason}`}>
+                          <IconButton
                             size="small"
+                            aria-label="Archive appointment"
                             onClick={(e) => handleDeleteAppointment(block.appointment, e)}
-                            sx={{ 
+                            sx={{
                               color: 'inherit',
-                              backgroundColor: !canModify 
+                              backgroundColor: !canModify
                                 ? 'rgba(128,128,128,0.6)'
-                                : 'rgba(244,67,54,0.8)',
-                              '&:hover': { 
-                                backgroundColor: !canModify 
+                                : 'rgba(237,108,2,0.85)',
+                              '&:hover': {
+                                backgroundColor: !canModify
                                   ? 'rgba(128,128,128,0.8)'
-                                  : 'rgba(244,67,54,1)' 
+                                  : 'rgba(237,108,2,1)'
                               }
                             }}
                           >
-                            {!canModify ? <Lock fontSize="small" /> : <Delete fontSize="small" />}
+                            {!canModify ? <Lock fontSize="small" /> : <ArchiveIcon fontSize="small" />}
                           </IconButton>
                         </Tooltip>
                         
@@ -1019,17 +1026,18 @@ export function CellDetailModal({
                           </IconButton>
                         </Tooltip>
                         
-                        <Tooltip title="Delete Time Block">
-                          <IconButton 
+                        <Tooltip title="Archive Time Block">
+                          <IconButton
                             size="small"
+                            aria-label="Archive time block"
                             onClick={(e) => handleDeleteTimeBlock(block.timeBlock, e)}
-                            sx={{ 
+                            sx={{
                               color: 'inherit',
-                              backgroundColor: 'rgba(244,67,54,0.8)',
-                              '&:hover': { backgroundColor: 'rgba(244,67,54,1)' }
+                              backgroundColor: 'rgba(237,108,2,0.85)',
+                              '&:hover': { backgroundColor: 'rgba(237,108,2,1)' }
                             }}
                           >
-                            <Delete fontSize="small" />
+                            <ArchiveIcon fontSize="small" />
                           </IconButton>
                         </Tooltip>
                       </Box>
@@ -1100,21 +1108,25 @@ export function CellDetailModal({
       />
     )}
 
-    {/* Delete Confirmation Modal */}
+    {/* Archive Confirmation Modal */}
     <ConfirmationModal
       open={deleteConfirmationOpen}
       onClose={handleDeleteCancel}
       onConfirm={handleDeleteConfirm}
-      title={itemToDelete?.type === 'appointment' ? 'Delete Appointment' : 'Delete Time Block'}
+      title={archiveTitle(itemToDelete?.type === 'appointment' ? 'appointment' : 'time_block')}
       message={
         itemToDelete?.type === 'appointment'
-          ? `Are you sure you want to delete this appointment for ${(itemToDelete.item as AppointmentSummary).student_name}?\n\nThis will also delete the associated therapy session and all planned goals/objectives.`
-          : `Are you sure you want to delete the time block "${(itemToDelete?.item as TimeBlockSummary)?.title}"?\n\nThis will delete ALL appointments in the time block and their therapy sessions.`
+          ? archiveMessage(
+              'appointment',
+              (itemToDelete.item as AppointmentSummary).student_name || undefined
+            )
+          : archiveMessage('time_block', (itemToDelete?.item as TimeBlockSummary)?.title || undefined)
       }
-      confirmText="Delete"
+      confirmText="Archive"
       cancelText="Cancel"
-      severity="error"
+      severity="warning"
       loading={deleteLoading}
+      loadingText="Archiving..."
     />
 
     {/* Series Action Dialog */}

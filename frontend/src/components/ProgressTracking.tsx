@@ -32,7 +32,7 @@ import {
 import {
   Add,
   Edit,
-  Delete,
+  Archive as ArchiveIcon,
   TrendingUp,
   Assessment,
   Notes,
@@ -47,6 +47,8 @@ import type {
   UpdateProgressEntryRequest,
   SESSION_TYPE_OPTIONS
 } from '../lib/api';
+import { useArchiveWithUndo, archiveMessage, archiveTitle } from '../lib/archive';
+import { ConfirmationModal } from './ui/ConfirmationModal';
 
 interface ProgressTrackingProps {
   objective: GoalObjective;
@@ -59,6 +61,10 @@ export function ProgressTracking({ objective, onProgressUpdate }: ProgressTracki
   const [error, setError] = useState<string | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingEntry, setEditingEntry] = useState<ObjectiveProgressEntry | null>(null);
+
+  const archiveWithUndo = useArchiveWithUndo();
+  const [archiveTarget, setArchiveTarget] = useState<ObjectiveProgressEntry | null>(null);
+  const [archiving, setArchiving] = useState(false);
 
   useEffect(() => {
     loadProgressEntries();
@@ -88,16 +94,26 @@ export function ProgressTracking({ objective, onProgressUpdate }: ProgressTracki
     setDialogOpen(true);
   };
 
-  const handleDeleteEntry = async (entryId: number) => {
-    if (window.confirm('Are you sure you want to delete this progress entry?')) {
-      try {
-        await goalsApi.deleteProgressEntry(entryId);
-        await loadProgressEntries();
-        onProgressUpdate?.();
-      } catch (error) {
-        console.error('Failed to delete progress entry:', error);
-        setError('Failed to delete progress entry');
-      }
+  const handleArchiveConfirm = async () => {
+    if (!archiveTarget) return;
+    setArchiving(true);
+    try {
+      await archiveWithUndo({
+        entity: 'progress_entry',
+        name: archiveTarget.progress_date,
+        archive: () => goalsApi.deleteProgressEntry(archiveTarget.id),
+        onChanged: async () => {
+          await loadProgressEntries();
+          onProgressUpdate?.();
+        },
+      });
+      setArchiveTarget(null);
+      setError(null);
+    } catch (error) {
+      console.error('Failed to archive progress entry:', error);
+      setError('Failed to archive progress entry');
+    } finally {
+      setArchiving(false);
     }
   };
 
@@ -259,10 +275,12 @@ export function ProgressTracking({ objective, onProgressUpdate }: ProgressTracki
                       </IconButton>
                       <IconButton
                         size="small"
-                        color="error"
-                        onClick={() => handleDeleteEntry(entry.id)}
+                        color="warning"
+                        onClick={() => setArchiveTarget(entry)}
+                        title="Archive entry"
+                        aria-label="Archive progress entry"
                       >
-                        <Delete fontSize="small" />
+                        <ArchiveIcon fontSize="small" />
                       </IconButton>
                     </TableCell>
                   </TableRow>
@@ -278,6 +296,22 @@ export function ProgressTracking({ objective, onProgressUpdate }: ProgressTracki
         entry={editingEntry}
         onClose={() => setDialogOpen(false)}
         onSave={handleSaveEntry}
+      />
+
+      <ConfirmationModal
+        open={Boolean(archiveTarget)}
+        onClose={() => setArchiveTarget(null)}
+        onConfirm={() => void handleArchiveConfirm()}
+        title={archiveTitle('progress_entry')}
+        message={
+          archiveTarget
+            ? archiveMessage('progress_entry', `entry from ${archiveTarget.progress_date}`)
+            : ''
+        }
+        confirmText="Archive"
+        severity="warning"
+        loading={archiving}
+        loadingText="Archiving..."
       />
     </Box>
   );

@@ -34,15 +34,17 @@ export function ProtectedAppointmentModal({
   reason
 }: ProtectedAppointmentModalProps) {
   
+  // The `'delete'` action name is the prop threaded down from CellDetailModal;
+  // the route it names archives rather than deletes, so the copy says so.
   const getTitle = () => {
-    return action === 'edit' ? 'Cannot Edit Appointment' : 'Cannot Delete Appointment';
+    return action === 'edit' ? 'Cannot Edit Appointment' : 'Cannot Archive Appointment';
   };
 
   const getDescription = () => {
     if (action === 'edit') {
       return 'This appointment cannot be modified because the therapy session is protected.';
     } else {
-      return 'This appointment cannot be deleted because the therapy session is protected.';
+      return 'This appointment cannot be archived because the therapy session is protected.';
     }
   };
 

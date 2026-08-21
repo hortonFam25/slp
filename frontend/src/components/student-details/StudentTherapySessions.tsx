@@ -39,7 +39,7 @@ import {
   Refresh, 
   MoreVert,
   Edit,
-  Delete,
+  Archive as ArchiveIcon,
   PlayArrow,
   Stop,
   CalendarToday,
@@ -53,6 +53,8 @@ import {
 } from '@mui/icons-material';
 import { TherapySessionSummary } from '../../lib/api/therapySessions';
 import { useDeleteTherapySession, useUpdateTherapySession } from '../../lib/hooks/useTherapySessions';
+import { useArchiveWithUndo, archiveMessage, archiveTitle } from '../../lib/archive';
+import { ConfirmationModal } from '../ui/ConfirmationModal';
 
 interface StudentTherapySessionsProps {
   studentId: number;
@@ -75,6 +77,9 @@ export function StudentTherapySessions({ studentId, therapySessions, loading, on
   const [rowsPerPage, setRowsPerPage] = useState(10);
   const deleteSessionMutation = useDeleteTherapySession();
   const updateSessionMutation = useUpdateTherapySession();
+  const archiveWithUndo = useArchiveWithUndo();
+  const [archiveTarget, setArchiveTarget] = useState<TherapySessionSummary | null>(null);
+  const [archiveError, setArchiveError] = useState<string | null>(null);
   const [durationDialogOpen, setDurationDialogOpen] = useState(false);
   const [durationSession, setDurationSession] = useState<TherapySessionSummary | null>(null);
   const [durationMinutes, setDurationMinutes] = useState<number>(0);
@@ -281,15 +286,23 @@ export function StudentTherapySessions({ studentId, therapySessions, loading, on
     console.log('Editing session:', session.id);
   };
 
-  const handleDeleteSession = async (session: TherapySessionSummary) => {
-    if (window.confirm('Are you sure you want to delete this therapy session?')) {
-      try {
-        await deleteSessionMutation.mutateAsync(session.id);
-        onRefresh();
-      } catch (err) {
-        console.error('Failed to delete therapy session:', err);
-        alert('Failed to delete therapy session. Please try again.');
-      }
+  const handleArchiveConfirm = async () => {
+    if (!archiveTarget) return;
+    const session = archiveTarget;
+    try {
+      setArchiveError(null);
+      await archiveWithUndo({
+        entity: 'therapy_session',
+        name: `session on ${session.session_date}`,
+        archive: () => deleteSessionMutation.mutateAsync(session.id),
+        onChanged: () => onRefresh(),
+      });
+      setArchiveTarget(null);
+    } catch (err) {
+      console.error('Failed to archive therapy session:', err);
+      setArchiveError(
+        err instanceof Error ? err.message : 'Failed to archive therapy session. Please try again.'
+      );
     }
   };
 
@@ -726,19 +739,41 @@ export function StudentTherapySessions({ studentId, therapySessions, loading, on
           </MenuItem>
         )}
         
-        <MenuItem 
+        <MenuItem
           onClick={() => {
-            if (selectedSession) handleDeleteSession(selectedSession);
+            if (selectedSession) {
+              setArchiveError(null);
+              setArchiveTarget(selectedSession);
+            }
             handleActionMenuClose();
           }}
-          sx={{ color: 'error.main' }}
+          sx={{ color: 'warning.main' }}
         >
           <ListItemIcon>
-            <Delete fontSize="small" color="error" />
+            <ArchiveIcon fontSize="small" color="warning" />
           </ListItemIcon>
-          <ListItemText>Delete Session</ListItemText>
+          <ListItemText>Archive Session</ListItemText>
         </MenuItem>
       </Menu>
+
+      <ConfirmationModal
+        open={Boolean(archiveTarget)}
+        onClose={() => setArchiveTarget(null)}
+        onConfirm={() => void handleArchiveConfirm()}
+        title={archiveTitle('therapy_session')}
+        message={
+          archiveTarget
+            ? [
+                archiveMessage('therapy_session', `session on ${archiveTarget.session_date}`),
+                ...(archiveError ? ['', `Last attempt failed: ${archiveError}`] : []),
+              ].join('\n')
+            : ''
+        }
+        confirmText="Archive"
+        severity="warning"
+        loading={deleteSessionMutation.isPending}
+        loadingText="Archiving..."
+      />
 
       {/* Adjust Duration Dialog */}
       <Dialog open={durationDialogOpen} onClose={handleCloseAdjustDuration} maxWidth="xs" fullWidth>

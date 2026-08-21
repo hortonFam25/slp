@@ -25,6 +25,7 @@ import {
 } from '@mui/material';
 import { Save, Edit, Cancel, Archive, Unarchive, Add, Delete } from '@mui/icons-material';
 import { Student, studentsApi, UpdateStudentRequest, StudentEligibility, EligibilityCategory } from '../../lib/api/students';
+import { useArchiveWithUndo, ARCHIVE_REASSURANCE } from '../../lib/archive';
 import { teachersApi, TeacherSummary } from '../../lib/api/teachers';
 import { eligibilitiesApi, CreateStudentEligibilityRequest } from '../../lib/api/eligibilities';
 import { schoolsApi } from '../../lib/api/schools';
@@ -39,6 +40,7 @@ interface StudentBasicInfoProps {
 export function StudentBasicInfo({ student, loading, onUpdate }: StudentBasicInfoProps) {
   const theme = useTheme();
   const isMobile = useMediaQuery(theme.breakpoints.down('sm'));
+  const archiveWithUndo = useArchiveWithUndo();
   const [isEditing, setIsEditing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -200,26 +202,53 @@ export function StudentBasicInfo({ student, loading, onUpdate }: StudentBasicInf
 
   const handleArchive = async () => {
     if (!student) return;
-    
-    const confirmMessage = student.is_archived 
-      ? 'Are you sure you want to unarchive this student? They will appear in active student lists again.'
-      : 'Are you sure you want to archive this student? They will be hidden from active student lists but their data will be preserved.';
-    
-    if (window.confirm(confirmMessage)) {
+
+    const studentId = student.id;
+    const studentName = `${student.first} ${student.last}`;
+
+    // Unarchiving is not destructive and needs no reassurance, so it keeps the
+    // plain confirmation. Archiving gets the shared promise, word for word.
+    const confirmMessage = student.is_archived
+      ? `Restore ${studentName} to active student lists?\n\nTheir goals, sessions and appointments come back with them — minus anything that was already archived before.`
+      : `Archive ${studentName}?\n\nTheir goals, objectives, progress entries, therapy sessions and appointments are archived with them.\n\n${ARCHIVE_REASSURANCE}`;
+
+    if (!window.confirm(confirmMessage)) return;
+
+    if (student.is_archived) {
       try {
         setSaving(true);
         setError(null);
-        
-        const updatedStudent = student.is_archived 
-          ? await studentsApi.unarchiveStudent(student.id)
-          : await studentsApi.archiveStudent(student.id);
-          
-        onUpdate(updatedStudent);
+        onUpdate(await studentsApi.unarchiveStudent(studentId));
       } catch (err) {
-        setError(err instanceof Error ? err.message : `Failed to ${student.is_archived ? 'unarchive' : 'archive'} student`);
+        setError(err instanceof Error ? err.message : 'Failed to unarchive student');
       } finally {
         setSaving(false);
       }
+      return;
+    }
+
+    try {
+      setSaving(true);
+      setError(null);
+      await archiveWithUndo({
+        entity: 'student',
+        name: studentName,
+        archive: () => studentsApi.archiveStudent(studentId),
+        // The PUT route answers with the student rather than an event id, so
+        // the undo is its mirror image; both move the same archive event.
+        undo: async () => {
+          onUpdate(await studentsApi.unarchiveStudent(studentId));
+        },
+        onChanged: async () => {
+          // Re-read rather than trusting the archive response: the drawer shows
+          // fields the archive cascade can touch.
+          onUpdate(await studentsApi.getStudent(studentId));
+        },
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to archive student');
+    } finally {
+      setSaving(false);
     }
   };
 

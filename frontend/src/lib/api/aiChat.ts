@@ -1,5 +1,9 @@
 import { BaseApiService } from './base';
 import { apiClient, buildAuthenticatedFetchHeaders } from './client';
+// Imported from the module rather than the barrel: `lib/db-wake/index.ts` also
+// exports the overlay component and the pre-warm hook, and this file is
+// imported by non-React code paths that have no business pulling those in.
+import { fetchThroughDbWake } from '../db-wake/fetchRetry';
 
 export interface AIChatSession {
   id: number;
@@ -97,15 +101,27 @@ class AIChatApiService extends BaseApiService {
     }
   ): Promise<void> {
     const baseUrl = apiClient.defaults.baseURL || '';
-    const headers = await buildAuthenticatedFetchHeaders({
-      'Content-Type': 'application/json',
-    });
-    const response = await fetch(`${baseUrl}/api/ai-chat/sessions/${sessionId}/messages/stream`, {
-      method: 'POST',
-      credentials: 'include',
-      headers,
-      body: JSON.stringify({ content }),
-    });
+    const url = `${baseUrl}/api/ai-chat/sessions/${sessionId}/messages/stream`;
+
+    // Still `fetch`, because this response is read incrementally and axios in
+    // the browser buffers the whole body before it resolves. The wrapper adds
+    // the wake-up handling the axios interceptor gives every other call: a
+    // `DB_WAKING` 503 is waited out and re-sent, and a lost connection on this
+    // POST is put to the user rather than silently re-sent, since a re-send
+    // could post the same message twice. Headers are rebuilt on every attempt
+    // so a token that expires during the wait is replaced.
+    const response = await fetchThroughDbWake(
+      async () =>
+        fetch(url, {
+          method: 'POST',
+          credentials: 'include',
+          headers: await buildAuthenticatedFetchHeaders({
+            'Content-Type': 'application/json',
+          }),
+          body: JSON.stringify({ content }),
+        }),
+      { label: `POST ${url}` }
+    );
 
     if (!response.ok) {
       throw new Error(`Streaming request failed (${response.status})`);

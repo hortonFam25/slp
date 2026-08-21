@@ -32,14 +32,16 @@ import {
   Refresh, 
   MoreVert,
   Edit,
-  Delete,
   PlayArrow,
   CalendarToday,
   Schedule,
   LocationOn,
   Person,
+  Archive as ArchiveIcon,
 } from '@mui/icons-material';
-import { AppointmentSummary } from '../../lib/api/scheduling';
+import { AppointmentSummary, schedulingApi } from '../../lib/api/scheduling';
+import { useArchiveWithUndo, archiveMessage, archiveTitle } from '../../lib/archive';
+import { ConfirmationModal } from '../ui/ConfirmationModal';
 
 interface StudentAppointmentsProps {
   studentId: number;
@@ -55,6 +57,10 @@ export function StudentAppointments({ studentId, appointments, loading, onRefres
   const [selectedAppointment, setSelectedAppointment] = useState<AppointmentSummary | null>(null);
   const [page, setPage] = useState(0);
   const [rowsPerPage, setRowsPerPage] = useState(10);
+  const archiveWithUndo = useArchiveWithUndo();
+  const [archiveTarget, setArchiveTarget] = useState<AppointmentSummary | null>(null);
+  const [archiving, setArchiving] = useState(false);
+  const [archiveError, setArchiveError] = useState<string | null>(null);
 
   const handleActionMenuOpen = (event: React.MouseEvent<HTMLElement>, appointment: AppointmentSummary) => {
     setActionMenuAnchor(event.currentTarget);
@@ -116,10 +122,36 @@ export function StudentAppointments({ studentId, appointments, loading, onRefres
     console.log('Editing appointment:', appointment.id);
   };
 
-  const handleDeleteAppointment = (appointment: AppointmentSummary) => {
-    if (window.confirm('Are you sure you want to delete this appointment?')) {
-      // TODO: Implement delete appointment
-      console.log('Deleting appointment:', appointment.id);
+  /** "3 Sep 2026 at 10:15" — `formatDateTime` returns the halves separately. */
+  const appointmentLabel = (appointment: AppointmentSummary) => {
+    const { date, time } = formatDateTime(appointment.start_datetime);
+    return `${date} at ${time}`;
+  };
+
+  // Was a `window.confirm` over a `console.log`. Now it actually archives --
+  // the route exists, answers with an archive event id, and the undo is free.
+  const handleArchiveConfirm = async () => {
+    if (!archiveTarget) return;
+    const appointment = archiveTarget;
+    setArchiving(true);
+    setArchiveError(null);
+    try {
+      await archiveWithUndo({
+        entity: 'appointment',
+        name: appointmentLabel(appointment),
+        archive: () => schedulingApi.deleteAppointment(appointment.id),
+        invalidateKeys: [['appointments']],
+        onChanged: () => onRefresh(),
+      });
+      setArchiveTarget(null);
+    } catch (err) {
+      // The server refuses an appointment whose session is completed or in
+      // progress; that 400's message is the one worth showing.
+      setArchiveError(
+        err instanceof Error ? err.message : 'Failed to archive appointment. Please try again.'
+      );
+    } finally {
+      setArchiving(false);
     }
   };
 
@@ -524,19 +556,41 @@ export function StudentAppointments({ studentId, appointments, loading, onRefres
           </MenuItem>
         )}
         
-        <MenuItem 
+        <MenuItem
           onClick={() => {
-            if (selectedAppointment) handleDeleteAppointment(selectedAppointment);
+            if (selectedAppointment) {
+              setArchiveError(null);
+              setArchiveTarget(selectedAppointment);
+            }
             handleActionMenuClose();
           }}
-          sx={{ color: 'error.main' }}
+          sx={{ color: 'warning.main' }}
         >
           <ListItemIcon>
-            <Delete fontSize="small" color="error" />
+            <ArchiveIcon fontSize="small" color="warning" />
           </ListItemIcon>
-          <ListItemText>Delete Appointment</ListItemText>
+          <ListItemText>Archive Appointment</ListItemText>
         </MenuItem>
       </Menu>
+
+      <ConfirmationModal
+        open={Boolean(archiveTarget)}
+        onClose={() => setArchiveTarget(null)}
+        onConfirm={() => void handleArchiveConfirm()}
+        title={archiveTitle('appointment')}
+        message={
+          archiveTarget
+            ? [
+                archiveMessage('appointment', appointmentLabel(archiveTarget)),
+                ...(archiveError ? ['', `Last attempt failed: ${archiveError}`] : []),
+              ].join('\n')
+            : ''
+        }
+        confirmText="Archive"
+        severity="warning"
+        loading={archiving}
+        loadingText="Archiving..."
+      />
           </CardContent>
         </Card>
       </Box>

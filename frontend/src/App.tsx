@@ -17,11 +17,14 @@ import Schedule from './features/schedule/Schedule';
 import Schools from './features/schools/Schools';
 import Teachers from './features/teachers/Teachers';
 import Settings from './features/settings/Settings';
+import ConnectClaude from './features/settings/ConnectClaude';
+import Archive from './features/archive/Archive';
 import Login from './features/auth/Login';
 import Chat from './features/chat/Chat';
 import ConnectAuthorize from './features/connect/ConnectAuthorize';
 import { readPendingConsent, CONSENT_PATH } from './lib/auth/pendingConsent';
 import { DatabaseWakingOverlay, useDbWakePrewarm } from './lib/db-wake';
+import { ArchiveUndoSnackbar } from './lib/archive';
 
 export default function App() {
   const mode = useThemeStore((s) => s.mode);
@@ -91,6 +94,12 @@ export default function App() {
           gated on authentication so it can never appear over the login or
           consent screens. */}
       {isAuthenticated && <DatabaseWakingOverlay />}
+      {/* "Goal archived. [UNDO]". Mounted here for the same reason as the
+          overlay above: every screen that can archive something writes to one
+          store, and the affordance has to look identical from all of them —
+          including the full-screen therapy session route, which renders
+          outside the shell. Renders nothing until something is archived. */}
+      {isAuthenticated && <ArchiveUndoSnackbar />}
       <Routes>
         {/* Unauthenticated routes */}
         <Route path="/login" element={<Login />} />
@@ -126,7 +135,9 @@ export default function App() {
             <Route path="/schedule" element={<AppShell><Schedule /></AppShell>} />
             <Route path="/schools" element={<AppShell><Schools /></AppShell>} />
             <Route path="/teachers" element={<AppShell><Teachers /></AppShell>} />
+            <Route path="/archive" element={<AppShell><Archive /></AppShell>} />
             <Route path="/settings" element={<AppShell><Settings /></AppShell>} />
+            <Route path="/settings/connect-claude" element={<AppShell><ConnectClaude /></AppShell>} />
             <Route path="/chat" element={<AppShell><Chat /></AppShell>} />
             <Route path="*" element={<Navigate to="/dashboard" replace />} />
           </>

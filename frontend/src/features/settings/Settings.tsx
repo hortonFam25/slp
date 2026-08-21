@@ -1,6 +1,7 @@
-import { Box, Button, FormControlLabel, Stack, Switch, TextField, Typography } from '@mui/material';
+import { Box, Button, Card, CardContent, FormControlLabel, Stack, Switch, TextField, Typography } from '@mui/material';
 import { useState } from 'react';
-import { Settings as SettingsIcon } from 'lucide-react';
+import { Link as RouterLink } from 'react-router-dom';
+import { Settings as SettingsIcon, Plug } from 'lucide-react';
 import { useThemeStore } from '../../lib/stores/themeStore';
 
 export default function Settings() {
@@ -31,6 +32,22 @@ export default function Settings() {
           <SettingsIcon size={24} />
           Settings
         </Typography>
+        <Card variant="outlined">
+          <CardContent>
+            <Typography variant="h6" sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+              <Plug size={20} />
+              Connect Claude
+            </Typography>
+            <Typography variant="body2" color="text.secondary" sx={{ my: 1 }}>
+              Let Claude read and write your own caseload, and manage the connection keys that
+              allow it.
+            </Typography>
+            <Button component={RouterLink} to="/settings/connect-claude" variant="outlined">
+              Manage connection
+            </Button>
+          </CardContent>
+        </Card>
+
         <Stack spacing={2}>
           <FormControlLabel
             control={<Switch checked={mode === 'dark'} onChange={toggle} />}
