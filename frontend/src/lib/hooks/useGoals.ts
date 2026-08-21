@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { goalsApi } from '../api/goals';
+import type { ArchiveResponse } from '../api/archive';
 import type {
   IEPGoal,
   IEPGoalSummary,
@@ -28,13 +29,16 @@ interface UseGoalsActions {
   fetchGoalCategories: () => Promise<void>;
   createGoal: (goal: CreateGoalRequest) => Promise<IEPGoal>;
   updateGoal: (goalId: number, updates: UpdateGoalRequest) => Promise<IEPGoal>;
-  deleteGoal: (goalId: number) => Promise<void>;
+  // The three `delete*` actions ARCHIVE. They keep their names because the
+  // routes kept their verbs, and they now hand back the archive response so a
+  // caller can offer an undo -- see lib/archive/useArchiveWithUndo.ts.
+  deleteGoal: (goalId: number) => Promise<ArchiveResponse>;
   createObjective: (objective: CreateObjectiveRequest) => Promise<GoalObjective>;
   updateObjective: (objectiveId: number, updates: UpdateObjectiveRequest) => Promise<GoalObjective>;
-  deleteObjective: (objectiveId: number) => Promise<void>;
+  deleteObjective: (objectiveId: number) => Promise<ArchiveResponse>;
   createProgressEntry: (entry: CreateProgressEntryRequest) => Promise<ObjectiveProgressEntry>;
   updateProgressEntry: (entryId: number, updates: UpdateProgressEntryRequest) => Promise<ObjectiveProgressEntry>;
-  deleteProgressEntry: (entryId: number) => Promise<void>;
+  deleteProgressEntry: (entryId: number) => Promise<ArchiveResponse>;
   refreshGoals: () => Promise<void>;
   clearError: () => void;
 }
@@ -131,17 +135,18 @@ export function useGoals(initialFilters?: GoalsFilters): UseGoalsState & UseGoal
     }
   }, [setError]);
 
-  const deleteGoal = useCallback(async (goalId: number): Promise<void> => {
+  const deleteGoal = useCallback(async (goalId: number): Promise<ArchiveResponse> => {
     try {
       setError(null);
-      await goalsApi.deleteGoal(goalId);
+      const result = await goalsApi.deleteGoal(goalId);
       setState(prev => ({
         ...prev,
         goals: prev.goals.filter(goal => goal.id !== goalId)
       }));
+      return result;
     } catch (error) {
-      console.error('Error deleting goal:', error);
-      const errorMessage = error instanceof Error ? error.message : 'Failed to delete goal';
+      console.error('Error archiving goal:', error);
+      const errorMessage = error instanceof Error ? error.message : 'Failed to archive goal';
       setError(errorMessage);
       throw error;
     }
@@ -192,11 +197,11 @@ export function useGoals(initialFilters?: GoalsFilters): UseGoalsState & UseGoal
     }
   }, [setError]);
 
-  const deleteObjective = useCallback(async (objectiveId: number): Promise<void> => {
+  const deleteObjective = useCallback(async (objectiveId: number): Promise<ArchiveResponse> => {
     try {
       setError(null);
-      await goalsApi.deleteObjective(objectiveId);
-      // Remove objective from goals state
+      const result = await goalsApi.deleteObjective(objectiveId);
+      // Drop the objective from local state; it is archived, not visible.
       setState(prev => ({
         ...prev,
         goals: prev.goals.map(goal => ({
@@ -204,9 +209,10 @@ export function useGoals(initialFilters?: GoalsFilters): UseGoalsState & UseGoal
           objectives: goal.objectives?.filter(obj => obj.id !== objectiveId)
         }))
       }));
+      return result;
     } catch (error) {
-      console.error('Error deleting objective:', error);
-      const errorMessage = error instanceof Error ? error.message : 'Failed to delete objective';
+      console.error('Error archiving objective:', error);
+      const errorMessage = error instanceof Error ? error.message : 'Failed to archive objective';
       setError(errorMessage);
       throw error;
     }
@@ -267,11 +273,11 @@ export function useGoals(initialFilters?: GoalsFilters): UseGoalsState & UseGoal
     }
   }, [setError]);
 
-  const deleteProgressEntry = useCallback(async (entryId: number): Promise<void> => {
+  const deleteProgressEntry = useCallback(async (entryId: number): Promise<ArchiveResponse> => {
     try {
       setError(null);
-      await goalsApi.deleteProgressEntry(entryId);
-      // Remove progress entry from state
+      const result = await goalsApi.deleteProgressEntry(entryId);
+      // Drop the entry from local state; it is archived, not visible.
       setState(prev => ({
         ...prev,
         goals: prev.goals.map(goal => ({
@@ -283,9 +289,10 @@ export function useGoals(initialFilters?: GoalsFilters): UseGoalsState & UseGoal
           }))
         }))
       }));
+      return result;
     } catch (error) {
-      console.error('Error deleting progress entry:', error);
-      const errorMessage = error instanceof Error ? error.message : 'Failed to delete progress entry';
+      console.error('Error archiving progress entry:', error);
+      const errorMessage = error instanceof Error ? error.message : 'Failed to archive progress entry';
       setError(errorMessage);
       throw error;
     }

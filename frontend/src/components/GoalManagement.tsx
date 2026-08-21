@@ -28,11 +28,13 @@ import {
 import {
   Add,
   Edit,
-  Delete,
+  Archive as ArchiveIcon,
   ExpandMore,
   TrackChanges
 } from '@mui/icons-material';
 import { useGoals } from '../lib/hooks/useGoals';
+import { useArchiveWithUndo, archiveMessage, archiveTitle } from '../lib/archive';
+import { ConfirmationModal } from './ui/ConfirmationModal';
 import type {
   IEPGoal,
   GoalObjective,
@@ -76,6 +78,18 @@ export function GoalManagement({ studentId, studentName }: GoalManagementProps) 
 
   const [expandedGoal, setExpandedGoal] = useState<number | null>(null);
 
+  const archiveWithUndo = useArchiveWithUndo();
+
+  // One piece of state for both confirmations: a goal and an objective are
+  // never being confirmed at the same moment, and two near-identical dialogs
+  // is how the copy drifts apart.
+  const [archiveTarget, setArchiveTarget] = useState<
+    | { kind: 'goal'; id: number; label: string }
+    | { kind: 'objective'; id: number; label: string }
+    | null
+  >(null);
+  const [archiving, setArchiving] = useState(false);
+
   useEffect(() => {
     if (studentId) {
       fetchStudentGoals(studentId);
@@ -90,14 +104,14 @@ export function GoalManagement({ studentId, studentName }: GoalManagementProps) 
     setDialogState({ type: 'goal', mode: 'edit', data: goal });
   };
 
-  const handleDeleteGoal = async (goalId: number) => {
-    if (window.confirm('Are you sure you want to delete this goal? This will also delete all objectives and progress entries.')) {
-      try {
-        await deleteGoal(goalId);
-      } catch (error) {
-        console.error('Failed to delete goal:', error);
-      }
-    }
+  const handleArchiveGoal = (goal: IEPGoal) => {
+    setArchiveTarget({
+      kind: 'goal',
+      id: goal.id,
+      // Empty when the goal is unnumbered; the copy helpers fall back to
+      // "this goal" rather than quoting a placeholder.
+      label: goal.goal_number ? `Annual Goal ${goal.goal_number}` : '',
+    });
   };
 
   const handleCreateObjective = (goalId: number) => {
@@ -108,13 +122,36 @@ export function GoalManagement({ studentId, studentName }: GoalManagementProps) 
     setDialogState({ type: 'objective', mode: 'edit', data: objective, goalId });
   };
 
-  const handleDeleteObjective = async (objectiveId: number) => {
-    if (window.confirm('Are you sure you want to delete this objective? This will also delete all progress entries.')) {
-      try {
-        await deleteObjective(objectiveId);
-      } catch (error) {
-        console.error('Failed to delete objective:', error);
-      }
+  const handleArchiveObjective = (objective: GoalObjective) => {
+    setArchiveTarget({
+      kind: 'objective',
+      id: objective.id,
+      label: `Objective ${objective.objective_number}`,
+    });
+  };
+
+  const handleArchiveConfirm = async () => {
+    if (!archiveTarget) return;
+    setArchiving(true);
+    try {
+      await archiveWithUndo({
+        entity: archiveTarget.kind,
+        name: archiveTarget.label || undefined,
+        archive: () =>
+          archiveTarget.kind === 'goal'
+            ? deleteGoal(archiveTarget.id)
+            : deleteObjective(archiveTarget.id),
+        // `useGoals` keeps its own copy of the list, so an undo has to re-read
+        // it rather than rely on a query invalidation nothing here subscribes to.
+        onChanged: () => fetchStudentGoals(studentId),
+      });
+      setArchiveTarget(null);
+    } catch (error) {
+      // `useGoals` has already put the message in `error`, which is rendered
+      // above the table; the dialog just stops pretending to be busy.
+      console.error('Failed to archive:', error);
+    } finally {
+      setArchiving(false);
     }
   };
 
@@ -239,8 +276,14 @@ export function GoalManagement({ studentId, studentName }: GoalManagementProps) 
                         <IconButton size="small" onClick={() => handleEditGoal(goal)} sx={{ color: '#40A8B6' }} title="Edit Goal">
                           <Edit fontSize="small" />
                         </IconButton>
-                        <IconButton size="small" onClick={() => handleDeleteGoal(goal.id)} sx={{ color: '#f44336' }} title="Delete Goal">
-                          <Delete fontSize="small" />
+                        <IconButton
+                          size="small"
+                          onClick={() => handleArchiveGoal(goal)}
+                          sx={{ color: '#b26a00' }}
+                          title="Archive Goal"
+                          aria-label="Archive goal"
+                        >
+                          <ArchiveIcon fontSize="small" />
                         </IconButton>
                       </TableCell>
                     </TableRow>
@@ -287,8 +330,14 @@ export function GoalManagement({ studentId, studentName }: GoalManagementProps) 
                                           <IconButton size="small" onClick={() => handleEditObjective(objective, goal.id)} sx={{ mr: 0.5, color: '#40A8B6' }}>
                                             <Edit fontSize="small" />
                                           </IconButton>
-                                          <IconButton size="small" onClick={() => handleDeleteObjective(objective.id)} sx={{ color: '#f44336' }}>
-                                            <Delete fontSize="small" />
+                                          <IconButton
+                                            size="small"
+                                            onClick={() => handleArchiveObjective(objective)}
+                                            sx={{ color: '#b26a00' }}
+                                            title="Archive Objective"
+                                            aria-label="Archive objective"
+                                          >
+                                            <ArchiveIcon fontSize="small" />
                                           </IconButton>
                                         </TableCell>
                                       </TableRow>
@@ -332,6 +381,23 @@ export function GoalManagement({ studentId, studentName }: GoalManagementProps) 
         onClose={closeDialog}
         onCreate={createObjective}
         onUpdate={updateObjective}
+      />
+
+      {/* Archive confirmation — goals and objectives share it. */}
+      <ConfirmationModal
+        open={Boolean(archiveTarget)}
+        onClose={() => setArchiveTarget(null)}
+        onConfirm={() => void handleArchiveConfirm()}
+        title={archiveTarget ? archiveTitle(archiveTarget.kind) : ''}
+        message={
+          archiveTarget
+            ? archiveMessage(archiveTarget.kind, archiveTarget.label || undefined)
+            : ''
+        }
+        confirmText="Archive"
+        severity="warning"
+        loading={archiving}
+        loadingText="Archiving..."
       />
 
     </Box>

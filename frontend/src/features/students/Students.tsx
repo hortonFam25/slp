@@ -24,7 +24,7 @@ import {
   MenuItem,
   Autocomplete
 } from '@mui/material';
-import { Add, Delete, Edit, Refresh, FileUpload, FileDownload, Visibility, Archive, Timeline } from '@mui/icons-material';
+import { Add, Edit, Refresh, FileUpload, FileDownload, Visibility, Archive, Timeline } from '@mui/icons-material';
 import { UsersRound } from 'lucide-react';
 import { useStudents } from '../../lib/hooks/useStudents';
 import { UniversalCSVImport } from '../../components/UniversalCSVImport';
@@ -36,9 +36,11 @@ import { teachersApi } from '../../lib/api/teachers';
 import { schoolsApi } from '../../lib/api/schools';
 import type { TeacherSummary } from '../../lib/api/types/teachers';
 import type { SchoolSummary } from '../../lib/api/types/schools';
+import { useArchiveWithUndo, archiveMessage, archiveTitle } from '../../lib/archive';
 
 export default function Students() {
-  const { students, loading, error, createStudent, deleteStudent, archiveStudent, refetch } = useStudents();
+  const { students, loading, error, createStudent, archiveStudent, unarchiveStudent, refetch } = useStudents();
+  const archiveWithUndo = useArchiveWithUndo();
   const theme = useTheme();
   const isMobile = useMediaQuery(theme.breakpoints.down('sm'));
   const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false);
@@ -119,16 +121,6 @@ export default function Students() {
     }
   };
 
-  const handleDeleteStudent = async (id: number, name: string) => {
-    if (window.confirm(`Are you sure you want to delete ${name}?`)) {
-      try {
-        await deleteStudent(id);
-      } catch (err) {
-        // Error is handled by the hook
-      }
-    }
-  };
-
   const handleOpenDetails = (studentId: number, studentName: string) => {
     setDetailsDialogState({
       open: true,
@@ -171,11 +163,21 @@ export default function Students() {
   };
 
   const handleArchiveConfirm = async () => {
-    if (!archiveConfirmState.studentId) return;
+    const studentId = archiveConfirmState.studentId;
+    if (!studentId) return;
 
     try {
       setArchiveConfirmState(prev => ({ ...prev, loading: true }));
-      await archiveStudent(archiveConfirmState.studentId);
+      await archiveWithUndo({
+        entity: 'student',
+        name: archiveConfirmState.studentName,
+        archive: () => archiveStudent(studentId),
+        // `PUT /students/{id}/archive` answers with the student, not with an
+        // archive event id -- so the undo is the matching unarchive route,
+        // which restores the very same event server-side.
+        undo: () => unarchiveStudent(studentId),
+        onChanged: () => refetch(),
+      });
       setArchiveConfirmState({ open: false, studentId: null, studentName: '', loading: false });
     } catch (err) {
       // Error is handled by the hook
@@ -532,13 +534,19 @@ export default function Students() {
                   >
                     <Timeline fontSize={isMobile ? 'small' : 'medium'} />
                   </IconButton>
+                  {/* There used to be a red "Delete Student" button beside this
+                      one. It is gone: `DELETE /api/students/{id}` now archives
+                      exactly what this button archives, so the pair were two
+                      controls doing one thing, and the red one was the one
+                      lying about it. */}
                   {!student.is_archived && (
-                    <IconButton 
-                      size="small" 
+                    <IconButton
+                      size="small"
                       color="warning"
                       onClick={() => handleArchiveClick(student.id, `${student.first} ${student.last}`)}
                       title="Archive Student"
-                      sx={{ 
+                      aria-label={`Archive ${student.first} ${student.last}`}
+                      sx={{
                         width: isMobile ? 36 : 40,
                         height: isMobile ? 36 : 40
                       }}
@@ -546,18 +554,6 @@ export default function Students() {
                       <Archive fontSize={isMobile ? 'small' : 'medium'} />
                     </IconButton>
                   )}
-                  <IconButton 
-                    size="small" 
-                    color="error"
-                    onClick={() => handleDeleteStudent(student.id, `${student.first} ${student.last}`)}
-                    title="Delete Student"
-                    sx={{ 
-                      width: isMobile ? 36 : 40,
-                      height: isMobile ? 36 : 40
-                    }}
-                  >
-                    <Delete fontSize={isMobile ? 'small' : 'medium'} />
-                  </IconButton>
                 </Stack>
               </Stack>
             </CardContent>
@@ -806,11 +802,12 @@ export default function Students() {
         open={archiveConfirmState.open}
         onClose={handleArchiveCancel}
         onConfirm={handleArchiveConfirm}
-        title="Archive Student"
-        message={`Are you sure you want to archive ${archiveConfirmState.studentName}?\n\nThe student will be hidden from active student lists but their data will be preserved. You can unarchive them later if needed.`}
+        title={archiveTitle('student')}
+        message={archiveMessage('student', archiveConfirmState.studentName)}
         confirmText="Archive"
         severity="warning"
         loading={archiveConfirmState.loading}
+        loadingText="Archiving..."
       />
     </Stack>
   );

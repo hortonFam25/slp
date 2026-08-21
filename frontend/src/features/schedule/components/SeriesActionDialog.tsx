@@ -25,6 +25,7 @@ import {
 } from '@mui/icons-material';
 import { format } from 'date-fns';
 import { AppointmentSummary, schedulingApi } from '../../../lib/api/scheduling';
+import { ARCHIVE_REASSURANCE } from '../../../lib/archive';
 
 interface SeriesActionDialogProps {
   open: boolean;
@@ -117,20 +118,24 @@ export function SeriesActionDialog({
     onClose();
   };
 
+  // The `action === 'delete'` discriminator keeps its name -- the route is
+  // still a DELETE and the prop is threaded through three components -- but
+  // everything a therapist READS now says archive, because that is what
+  // happens. See backend/app/routers/scheduling.py.
   const getActionTitle = () => {
-    return action === 'edit' ? 'Edit Recurring Series' : 'Delete Recurring Series';
+    return action === 'edit' ? 'Edit Recurring Series' : 'Archive Recurring Series';
   };
 
   const getActionDescription = () => {
     if (action === 'edit') {
       return 'This appointment is part of a recurring series. What would you like to edit?';
     } else {
-      return 'This appointment is part of a recurring series. What would you like to delete?';
+      return 'This appointment is part of a recurring series. What would you like to archive?';
     }
   };
 
   const getSingleOptionLabel = () => {
-    return action === 'edit' ? 'Edit this appointment only' : 'Delete this appointment only';
+    return action === 'edit' ? 'Edit this appointment only' : 'Archive this appointment only';
   };
 
   const getSeriesOptionLabel = () => {
@@ -139,21 +144,21 @@ export function SeriesActionDialog({
     if (action === 'edit') {
       return `Edit series (${upcomingCount} of ${totalCount} appointment${totalCount !== 1 ? 's' : ''})`;
     } else {
-      return `Delete series (${upcomingCount} of ${totalCount} appointment${totalCount !== 1 ? 's' : ''})`;
+      return `Archive series (${upcomingCount} of ${totalCount} appointment${totalCount !== 1 ? 's' : ''})`;
     }
   };
 
   const getConfirmButtonText = () => {
     if (selectedOption === 'single') {
-      return action === 'edit' ? 'Edit Appointment' : 'Delete Appointment';
+      return action === 'edit' ? 'Edit Appointment' : 'Archive Appointment';
     } else {
-      return action === 'edit' ? 'Edit Series' : 'Delete Series';
+      return action === 'edit' ? 'Edit Series' : 'Archive Series';
     }
   };
 
   const getConfirmButtonColor = () => {
     if (action === 'delete') {
-      return 'error' as const;
+      return 'warning' as const;
     }
     return 'primary' as const;
   };
@@ -277,9 +282,9 @@ export function SeriesActionDialog({
                       {getSeriesOptionLabel()}
                     </Typography>
                     <Typography variant="body2" color="text.secondary">
-                      {action === 'edit' 
+                      {action === 'edit'
                         ? 'Applies changes to all appointments in the recurring series'
-                        : 'Permanently removes all appointments in the recurring series'
+                        : 'Archives all current and future appointments in the recurring series'
                       }
                     </Typography>
                   </Box>
@@ -293,8 +298,8 @@ export function SeriesActionDialog({
                 severity={action === 'delete' ? 'warning' : 'info'} 
                 icon={action === 'delete' ? <Warning /> : <Info />}
               >
-                {action === 'delete' 
-                  ? 'This will permanently delete all current and future appointments in the series. Completed appointments and in-progress therapy sessions will not be affected.'
+                {action === 'delete'
+                  ? `All current and future appointments in the series are archived under one entry, so one undo brings the whole series back. Completed appointments and in-progress therapy sessions are not affected. ${ARCHIVE_REASSURANCE}`
                   : 'Changes will be applied to all current and future appointments in the series. Completed appointments and in-progress therapy sessions will not be affected.'
                 }
               </Alert>

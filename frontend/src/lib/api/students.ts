@@ -1,5 +1,6 @@
 import { BaseApiService } from './base';
 import { API_ENDPOINTS } from './types';
+import type { ArchiveResponse } from './archive';
 
 // Eligibility interfaces
 export interface EligibilityCategory {
@@ -172,9 +173,11 @@ class StudentsApiService extends BaseApiService {
     return this.put<Student>(`/${id}`, data);
   }
 
-  // Delete a student
-  async deleteStudent(id: number): Promise<void> {
-    return this.delete<void>(`/${id}`);
+  // ARCHIVES the student and everything under them. Same verb, same path --
+  // the backend stopped deleting; see backend/app/routers/students.py. The
+  // response carries `archiveEventId`, which is what makes an undo possible.
+  async deleteStudent(id: number): Promise<ArchiveResponse> {
+    return this.delete<ArchiveResponse>(`/${id}`);
   }
 
   // Archive a student (hide from active lists but preserve data)

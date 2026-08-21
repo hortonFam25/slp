@@ -1,4 +1,5 @@
 import { BaseApiService } from './base';
+import type { ArchiveResponse } from './archive';
 
 // Types for therapy sessions
 export interface SessionGoal {
@@ -281,8 +282,11 @@ class TherapySessionApiService extends BaseApiService {
     return this.post<TherapySession>(`/${sessionId}/complete`, request);
   }
 
-  async deleteSession(sessionId: number): Promise<{ message: string }> {
-    return this.delete<{ message: string }>(`/${sessionId}`);
+  // ARCHIVES the session. Its progress entries deliberately STAY active --
+  // they are the evidence a service was delivered, and hiding the session must
+  // not blank a child's progress data. See backend/app/services/archive.py.
+  async deleteSession(sessionId: number): Promise<ArchiveResponse> {
+    return this.delete<ArchiveResponse>(`/${sessionId}`);
   }
 
   async getStudentSessions(studentId: number, limit = 500): Promise<TherapySessionSummary[]> {

@@ -14,6 +14,8 @@ import {
   UserSquare2,
   Settings,
   MessageSquare,
+  Archive,
+  Plug,
   Menu as MenuIcon,
 } from 'lucide-react';
 
@@ -33,7 +35,12 @@ const navigationItems = [
   { path: '/teachers', label: 'Support Staff', icon: UserSquare2 },
   { path: '/schools', label: 'Schools', icon: GraduationCap },
   { path: '/analytics', label: 'Analytics', icon: BarChart3 },
+  // Nothing is deleted any more; this is where archived records are read back
+  // and restored. It sits above Settings because it is a clinical view, not a
+  // preference.
+  { path: '/archive', label: 'Archive', icon: Archive },
   { path: '/settings', label: 'Settings', icon: Settings },
+  { path: '/settings/connect-claude', label: 'Connect Claude', icon: Plug },
 ];
 
 export function Sidebar({ open = true, onNavigate, onToggle }: SidebarProps) {

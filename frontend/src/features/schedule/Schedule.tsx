@@ -60,6 +60,7 @@ import { StartSessionRequest } from '../../lib/api/therapySessions';
 import { AppointmentSummary, TimeBlockSummary, schedulingApi } from '../../lib/api/scheduling';
 import { StudentSummary } from '../../lib/api/students';
 import { StudentScheduleView } from '../../lib/api/schedulingStudents';
+import { useArchiveWithUndo } from '../../lib/archive';
 import { useNavigate } from 'react-router-dom';
 
 interface TabPanelProps {
@@ -112,6 +113,7 @@ export default function Schedule() {
   
   // API hooks
   const startSessionMutation = useStartTherapySession();
+  const archiveWithUndo = useArchiveWithUndo();
   const navigate = useNavigate();
   
   // Student scheduling modal state
@@ -511,31 +513,39 @@ export default function Schedule() {
     setStartSessionModalOpen(true);
   };
 
-  // Handle deleting appointment from cell detail modal
+  // ARCHIVES the appointment (and its therapy session) from the cell detail
+  // modal. The undo snackbar is raised here rather than in the modal because
+  // this is where the refetches live -- an undo has to put the calendar back,
+  // not just the row.
   const handleDeleteAppointment = async (appointment: AppointmentSummary) => {
-    console.log('🗑️ Deleting appointment:', appointment);
     try {
-      const { schedulingApi } = await import('../../lib/api/scheduling');
-      await schedulingApi.deleteAppointment(appointment.id);
-      console.log('✅ Appointment deleted successfully');
-      await refetchAppointments();
+      await archiveWithUndo({
+        entity: 'appointment',
+        name: appointment.student_name || undefined,
+        archive: () => schedulingApi.deleteAppointment(appointment.id),
+        onChanged: () => refetchAppointments(),
+      });
     } catch (error) {
-      console.error('❌ Failed to delete appointment:', error);
+      console.error('❌ Failed to archive appointment:', error);
       throw error; // Re-throw so the modal can show the error
     }
   };
 
-  // Handle deleting time block from cell detail modal
+  // ARCHIVES the block with its appointments and sessions. Student assignments
+  // survive, which is what lets the undo hand the group back whole.
   const handleDeleteTimeBlock = async (timeBlock: TimeBlockSummary) => {
-    console.log('🗑️ Deleting time block:', timeBlock);
     try {
-      const { schedulingApi } = await import('../../lib/api/scheduling');
-      await schedulingApi.deleteTimeBlock(timeBlock.id);
-      console.log('✅ Time block deleted successfully');
-      await refetchTimeBlocks();
-      await refetchAppointments(); // Also refresh appointments since they may be deleted
+      await archiveWithUndo({
+        entity: 'time_block',
+        name: timeBlock.title || undefined,
+        archive: () => schedulingApi.deleteTimeBlock(timeBlock.id),
+        onChanged: async () => {
+          await refetchTimeBlocks();
+          await refetchAppointments(); // its appointments moved with it
+        },
+      });
     } catch (error) {
-      console.error('❌ Failed to delete time block:', error);
+      console.error('❌ Failed to archive time block:', error);
       throw error; // Re-throw so the modal can show the error
     }
   };

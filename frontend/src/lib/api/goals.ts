@@ -1,4 +1,5 @@
 import { BaseApiService } from './base';
+import type { ArchiveResponse } from './archive';
 import type {
   IEPGoal,
   IEPGoalSummary,
@@ -85,8 +86,11 @@ class GoalsApiService extends BaseApiService {
     return this.put<IEPGoal>(`/goals/${goalId}`, updates);
   }
 
-  async deleteGoal(goalId: number): Promise<void> {
-    return this.delete(`/goals/${goalId}`);
+  // ARCHIVES the goal with its objectives and their progress entries. Same
+  // verb, same path -- the backend stopped deleting. The response carries
+  // `archiveEventId`, which is what an undo is built from.
+  async deleteGoal(goalId: number): Promise<ArchiveResponse> {
+    return this.delete<ArchiveResponse>(`/goals/${goalId}`);
   }
 
   // Goal Objectives
@@ -120,8 +124,9 @@ class GoalsApiService extends BaseApiService {
     return this.put<GoalObjective>(`/objectives/${objectiveId}`, updates);
   }
 
-  async deleteObjective(objectiveId: number): Promise<void> {
-    return this.delete(`/objectives/${objectiveId}`);
+  // ARCHIVES the objective with its progress entries.
+  async deleteObjective(objectiveId: number): Promise<ArchiveResponse> {
+    return this.delete<ArchiveResponse>(`/objectives/${objectiveId}`);
   }
 
   // Progress Entries
@@ -152,8 +157,9 @@ class GoalsApiService extends BaseApiService {
     return this.put<ObjectiveProgressEntry>(`/progress-entries/${entryId}`, updates);
   }
 
-  async deleteProgressEntry(entryId: number): Promise<void> {
-    return this.delete(`/progress-entries/${entryId}`);
+  // ARCHIVES the entry. It is a leaf -- nothing goes with it.
+  async deleteProgressEntry(entryId: number): Promise<ArchiveResponse> {
+    return this.delete<ArchiveResponse>(`/progress-entries/${entryId}`);
   }
 
   // Bulk Operations
