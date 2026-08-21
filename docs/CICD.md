@@ -283,3 +283,31 @@ to `.gitignore`.
   deploys.
 - [`docs/CONNECT_CLAUDE.md`](CONNECT_CLAUDE.md) — user-facing connection
   guide.
+
+## Required App Settings (the `.env` trap)
+
+The manual deploy scripts used to copy `backend/.env` into the zip, so
+production quietly inherited whatever that file contained. `deploy.yml`
+excludes `.env*` on purpose — secrets do not belong in deploy artefacts — which
+means **every setting the API needs must exist as an App Service App Setting**.
+On 2026-08-21 four keys that had only ever lived in `.env` turned out to be
+missing from `slppro-api` (`ACCESS_ADMIN_EMAILS`, `ACCESS_CONTROL_MODE`,
+`ACCESS_FULL_STUDENT_ACCESS_EMAILS`, `OPENAI_API_KEY`): nobody was admin and
+the in-app AI chat had no key. The backend deploy job now has a gate that
+fails BEFORE deploying if any of these names is absent on the target (names
+only — values are never read or logged):
+
+| Setting | Purpose |
+|---|---|
+| `ENVIRONMENT` | `production` — turns on JWT signature verification, turns off dev `create_all` |
+| `AUTH_REQUIRE_BEARER` | `true` — no anonymous fallback user |
+| `AAD_TENANT_ID`, `AAD_CLIENT_ID` | Entra validation (issuer / JWKS) |
+| `SQL_SERVER_CONNECTION_STRING` | Azure SQL (slpdb_2) |
+| `SLP_PUBLIC_ORIGIN`, `SLP_FRONTEND_ORIGIN` | OAuth issuer/resource URI and consent-page redirect |
+| `ACCESS_CONTROL_MODE` | `off` / `monitor` / `enforce` |
+| `ACCESS_ADMIN_EMAILS` | JSON list of admin sign-in emails (admins see aliases in the UI) |
+| `ACCESS_FULL_STUDENT_ACCESS_EMAILS` | JSON list of accounts auto-granted every student |
+| `OPENAI_API_KEY` | In-app AI chat |
+
+Add a row here AND to `REQUIRED_APP_SETTINGS` in `deploy.yml` whenever the
+API grows a new required setting.
